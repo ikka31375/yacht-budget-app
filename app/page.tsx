@@ -1,69 +1,145 @@
-import Image from "next/image";
+'use client';
+
+import { useEffect, useState } from 'react';
+import { supabase } from '@/lib/supabase';
+import { Member, Payment, Expense, BillingEvent } from '@/types';
 
 export default function Home() {
+  const [members, setMembers] = useState<Member[]>([]);
+  const [selectedMemberId, setSelectedMemberId] = useState<string>('');
+  const [payments, setPayments] = useState<Payment[]>([]);
+  const [expenses, setExpenses] = useState<Expense[]>([]);
+  const [events, setEvents] = useState<BillingEvent[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+
+  // 初回データ読み込み
+  useEffect(() => {
+    fetchData();
+    const saved = localStorage.getItem('selectedMemberId');
+    if (saved) setSelectedMemberId(saved);
+  }, []);
+
+  const fetchData = async () => {
+    setLoading(true);
+    const { data: mData } = await supabase.from('members').select('*');
+    const { data: pData } = await supabase.from('payments').select('*');
+    const { data: eData } = await supabase.from('expenses').select('*');
+    const { data: bData } = await supabase.from('billing_events').select('*');
+
+    if (mData) setMembers(mData);
+    if (pData) setPayments(pData);
+    if (eData) setExpenses(eData);
+    if (bData) setEvents(bData);
+    setLoading(false);
+  };
+
+  const handleMemberChange = (id: string) => {
+    setSelectedMemberId(id);
+    localStorage.setItem('selectedMemberId', id);
+  };
+
+  // 収支バランス計算（立替未受取額 - 未納額）
+  const calculateBalance = (memberId: string) => {
+    const unpaidSum = payments
+      .filter((p) => p.member_id === memberId && p.status === '未納')
+      .reduce((sum, p) => {
+        const ev = events.find((e) => e.id === p.billing_event_id);
+        return sum + (ev?.amount || 0);
+      }, 0);
+
+    const unreimbursedSum = expenses
+      .filter((e) => e.member_id === memberId && e.status === '未精算')
+      .reduce((sum, e) => sum + e.amount, 0);
+
+    return unreimbursedSum - unpaidSum;
+  };
+
+  // 支払いステータス切り替え
+  const togglePayment = async (paymentId: string, currentStatus: string) => {
+    const nextStatus = currentStatus === '未納' ? '支払済' : '未納';
+    await supabase.from('payments').update({ status: nextStatus }).eq('id', paymentId);
+    fetchData();
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+    <main className="max-w-md mx-auto p-4 space-y-6 pb-20 min-h-screen bg-white">
+      <header className="border-b pb-3">
+        <h1 className="text-xl font-bold text-gray-800">⛵ ヨット部 部費管理</h1>
+        <div className="mt-3">
+          <label className="text-xs text-gray-500 font-medium">ログイン不要：あなたの名前を選択</label>
+          <select
+            value={selectedMemberId}
+            onChange={(e) => handleMemberChange(e.target.value)}
+            className="w-full mt-1 p-2 border border-gray-300 rounded-md bg-gray-50 text-sm text-gray-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
           >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+            <option value="">-- 部員を選択してください --</option>
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.grade}年 {m.name} ({m.role})
+              </option>
+            ))}
+          </select>
         </div>
-      </main>
-    </div>
+      </header>
+
+      {loading ? (
+        <p className="text-sm text-gray-500 text-center py-8">データを読み込み中...</p>
+      ) : (
+        <>
+          {/* 部員別 収支バランス（負債 / 前払い状況） */}
+          <section className="space-y-3">
+            <h2 className="font-semibold text-sm text-gray-700">部員別 収支バランス</h2>
+            <div className="space-y-2">
+              {members.map((m) => {
+                const balance = calculateBalance(m.id);
+                return (
+                  <div key={m.id} className="flex justify-between items-center p-3 bg-gray-50 border border-gray-100 rounded-lg text-sm">
+                    <span className="font-medium text-gray-800">{m.grade}年 {m.name}</span>
+                    <span className={`font-bold ${balance < 0 ? 'text-red-600' : balance > 0 ? 'text-blue-600' : 'text-gray-500'}`}>
+                      {balance < 0 
+                        ? `負債: ¥${Math.abs(balance).toLocaleString()}` 
+                        : balance > 0 
+                        ? `立替/前払: +¥${balance.toLocaleString()}` 
+                        : '±¥0'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+
+          {/* 請求・支払い一覧 */}
+          <section className="space-y-3">
+            <h2 className="font-semibold text-sm text-gray-700">請求・納入ステータス</h2>
+            {payments.length === 0 ? (
+              <p className="text-xs text-gray-400 p-3 bg-gray-50 rounded-lg border text-center">請求データはまだありません</p>
+            ) : (
+              payments.map((p) => {
+                const ev = events.find((e) => e.id === p.billing_event_id);
+                const member = members.find((m) => m.id === p.member_id);
+                return (
+                  <div key={p.id} className="flex justify-between items-center p-3 border border-gray-200 rounded-lg">
+                    <div>
+                      <p className="font-medium text-sm text-gray-800">{ev?.title || '部費'}</p>
+                      <p className="text-xs text-gray-500">{member?.name} | ¥{ev?.amount.toLocaleString()}</p>
+                    </div>
+                    <button
+                      onClick={() => togglePayment(p.id, p.status)}
+                      className={`text-xs px-3 py-1.5 rounded-full font-bold transition shadow-sm ${
+                        p.status === '支払済' 
+                          ? 'bg-green-100 text-green-700 border border-green-300' 
+                          : 'bg-red-100 text-red-600 border border-red-300'
+                      }`}
+                    >
+                      {p.status}
+                    </button>
+                  </div>
+                );
+              })
+            )}
+          </section>
+        </>
+      )}
+    </main>
   );
 }
