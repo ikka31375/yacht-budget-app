@@ -123,15 +123,16 @@ export default function Home() {
     .filter((t) => t.type === '支出')
     .reduce((sum, t) => sum + t.amount, 0);
 
+  // 現金精算（相殺でもデポジット振替でもない精算）のみ金庫から出金扱いとする
   const totalReimbursedExpenses = expenses
-    .filter((e) => e.status === '精算済' && !e.offset_payment_id)
+    .filter((e) => e.status === '精算済' && !e.offset_payment_id && e.reject_reason !== 'デポジット振替')
     .reduce((sum, e) => sum + e.amount, 0);
 
   // 金庫の推定保有純現金
   const estimatedClubTreasury =
     totalCollectedDues + totalDeposits + totalClubDonations - totalDirectClubExpenses - totalReimbursedExpenses;
 
-  // カテゴリ別支出集計（部直接支出 + 個人立替の全確定分）
+  // カテゴリ別支出集計
   const categorySpendingMap: { [cat: string]: number } = {};
   clubTransactions
     .filter((t) => t.type === '支出')
@@ -173,7 +174,7 @@ export default function Home() {
     });
   };
 
-  // 請求イベント作成
+  // 請求作成
   const handleCreateBillingEvent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!eventTitle || !eventAmount || targetMemberIds.length === 0) {
@@ -263,7 +264,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 部全体の直接出費 / 収入登録
+  // 部全体の直接出納の登録
   const handleCreateClubTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!txTitle || !txAmount) return;
@@ -379,6 +380,36 @@ export default function Home() {
     setSelectedExpenseForOffset(null);
     setTargetPaymentIdForOffset('');
     setIsSubmitting(false);
+    fetchData();
+  };
+
+  // ★ 新機能: 立替金をデポジット残高へ振り替え
+  const handleConvertToDeposit = async (expense: Expense) => {
+    const mem = members.find((m) => m.id === expense.member_id);
+    if (!mem) return;
+
+    if (!confirm(`立替金 ¥${expense.amount.toLocaleString()} を返金せず、${mem.name} さんのデポジット（預かり金）に移行しますか？`)) {
+      return;
+    }
+
+    // 1. 立替を精算済（デポジット振替）に更新
+    await supabase
+      .from('expenses')
+      .update({
+        status: '精算済',
+        reject_reason: 'デポジット振替',
+      })
+      .eq('id', expense.id);
+
+    // 2. 部員のデポジット残高に加算
+    await supabase
+      .from('members')
+      .update({
+        deposit_balance: (mem.deposit_balance || 0) + expense.amount,
+      })
+      .eq('id', mem.id);
+
+    alert(`¥${expense.amount.toLocaleString()} を ${mem.name} さんのデポジット残高に移行しました！`);
     fetchData();
   };
 
@@ -636,7 +667,7 @@ export default function Home() {
                                 : 'bg-yellow-100 text-yellow-800'
                             }`}
                           >
-                            {e.status}
+                            {e.status} {e.reject_reason === 'デポジット振替' && '(デポジット)'}
                           </span>
                         </div>
 
@@ -666,6 +697,13 @@ export default function Home() {
                                 🔄 部費へ相殺
                               </button>
                             )}
+                            {/* ★ デポジットへ移行ボタン */}
+                            <button
+                              onClick={() => handleConvertToDeposit(e)}
+                              className="text-[10px] bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-2 py-1 rounded-md shadow-sm"
+                            >
+                              💰 デポジットへ移行
+                            </button>
                             <button
                               onClick={() => toggleExpenseNormal(e.id, e.status)}
                               className="text-[10px] bg-slate-700 hover:bg-slate-800 text-white font-bold px-2 py-1 rounded-md"
@@ -695,7 +733,6 @@ export default function Home() {
           {/* ============================================================== */}
           {activeTab === 'club' && (
             <div className="space-y-4">
-              {/* 金庫サマリーカード */}
               <div className="bg-gradient-to-br from-slate-900 to-slate-800 text-white p-5 rounded-3xl shadow-md space-y-3">
                 <div className="flex justify-between items-center text-xs text-slate-400">
                   <span>部の推定総資金（口座＋現金箱）</span>
@@ -716,7 +753,6 @@ export default function Home() {
                 </div>
               </div>
 
-              {/* 部全体の直接出納の登録ボタン */}
               <button
                 onClick={() => setShowClubTxModal(true)}
                 className="w-full p-3 bg-white border border-slate-200 hover:bg-slate-50 text-slate-800 rounded-xl font-bold text-xs shadow-sm flex items-center justify-center gap-1.5"
@@ -724,7 +760,6 @@ export default function Home() {
                 <span>➕</span> 部口座/金庫からの出費・寄付を記録
               </button>
 
-              {/* カテゴリ別 支出内訳プログレスバー */}
               <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 space-y-3">
                 <div className="flex justify-between items-center">
                   <h2 className="font-extrabold text-xs text-slate-500 uppercase tracking-wider">支出カテゴリ別 内訳</h2>
@@ -752,7 +787,6 @@ export default function Home() {
                 )}
               </section>
 
-              {/* 部全体の直接出納履歴 */}
               <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-100 space-y-3">
                 <h2 className="font-extrabold text-xs text-slate-500 uppercase tracking-wider">部の直接出納履歴</h2>
                 {clubTransactions.length === 0 ? (
@@ -839,10 +873,6 @@ export default function Home() {
         </>
       )}
 
-      {/* ============================================================== */}
-      {/* モーダル群                                                     */}
-      {/* ============================================================== */}
-
       {/* モーダル: 部員詳細カルテ */}
       {selectedMemberDetail && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
@@ -857,7 +887,6 @@ export default function Home() {
               <button onClick={() => setSelectedMemberDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold text-lg">✕</button>
             </div>
 
-            {/* カルテ内タイムライン */}
             <div className="space-y-2">
               <h4 className="text-xs font-bold text-slate-600">納入履歴</h4>
               {payments.filter((p) => p.member_id === selectedMemberDetail.id).length === 0 ? (
@@ -885,7 +914,7 @@ export default function Home() {
                   <div key={e.id} className="p-2 bg-slate-50 rounded-lg text-xs flex justify-between items-center">
                     <div>
                       <p className="font-semibold text-slate-800">{e.title} (¥{e.amount.toLocaleString()})</p>
-                      <p className="text-[10px] text-slate-500">{e.category}</p>
+                      <p className="text-[10px] text-slate-500">{e.category} {e.reject_reason && `(${e.reject_reason})`}</p>
                     </div>
                     <span className="font-bold text-slate-600">{e.status}</span>
                   </div>
