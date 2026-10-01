@@ -34,3 +34,15 @@ export interface Expense {
   offset_payment_id?: string;
   created_at?: string;
 }
+
+export interface ClubTransaction {
+  id: string;
+  type: '支出' | '収入';
+  title: string;
+  amount: number;
+  category: string;
+  payment_source: '部口座振込' | '部室現金';
+  event_tag?: string;
+  receipt_url?: string;
+  created_at?: string;
+}
