@@ -19,7 +19,8 @@ export interface Payment {
   id: string;
   billing_event_id: string;
   member_id: string;
-  status: '未納' | '支払済';
+  status: '未納' | '支払済' | '一部納入';
+  paid_amount: number;
   payment_method?: string;
   offset_expense_id?: string;
 }
@@ -31,7 +32,7 @@ export interface Expense {
   amount: number;
   category: string;
   receipt_url?: string;
-  status: '未精算' | '精算済' | '差戻し';
+  status: '未精算' | '精算済';
   reject_reason?: string;
   offset_payment_id?: string;
   created_at?: string;
