@@ -89,7 +89,7 @@ export default function Home() {
 
   const currentMember = members.find((m) => m.id === selectedMemberId);
 
-  // 金額計算
+  // 金額計算（一部納入・一部精算対応）
   const getUnpaidTotal = (memberId: string) => {
     return payments
       .filter((p) => p.member_id === memberId && p.status !== '支払済')
@@ -103,8 +103,12 @@ export default function Home() {
 
   const getUnreimbursedTotal = (memberId: string) => {
     return expenses
-      .filter((e) => e.member_id === memberId && e.status === '未精算')
-      .reduce((sum, e) => sum + e.amount, 0);
+      .filter((e) => e.member_id === memberId && e.status !== '精算済')
+      .reduce((sum, e) => {
+        const total = e.amount;
+        const settled = e.settled_amount || 0;
+        return sum + Math.max(0, total - settled);
+      }, 0);
   };
 
   const totalCollectedDues = payments
@@ -210,7 +214,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 2. 立替申請
+  // 2. 個人立替申請
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedMemberId) {
@@ -246,6 +250,7 @@ export default function Home() {
       category: expenseCategory,
       receipt_url: receiptUrl,
       status: '未精算',
+      settled_amount: 0,
     });
 
     setExpenseTitle('');
@@ -280,7 +285,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 4. 請求ステータス変更（双方向連動対応）
+  // 4. 請求ステータス変更（完全な巻き戻し対応）
   const executePaymentStatusChange = async () => {
     if (!confirmPaymentTarget) return;
     setIsSubmitting(true);
@@ -290,6 +295,7 @@ export default function Home() {
     const isClearing = confirmPaymentTarget.status !== '支払済';
 
     if (isClearing) {
+      // 完済にする
       await supabase
         .from('payments')
         .update({
@@ -299,7 +305,7 @@ export default function Home() {
         })
         .eq('id', confirmPaymentTarget.id);
     } else {
-      // 未納へ戻す場合: 相殺立替を未精算へ復元
+      // 未納へ戻す場合: 相殺されていた相手の立替を完全巻き戻し
       const linkedExpense = expenses.find(
         (e) => e.offset_payment_id === confirmPaymentTarget.id || e.id === confirmPaymentTarget.offset_expense_id
       );
@@ -309,6 +315,7 @@ export default function Home() {
           .from('expenses')
           .update({
             status: '未精算',
+            settled_amount: 0,
             offset_payment_id: null,
             reject_reason: '',
           })
@@ -331,7 +338,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 5. 相殺実行（双方向キーを相互保持）
+  // 5. 【パターンA】立替レコードを分割しない完全非破壊相殺
   const handleExecuteOffset = async () => {
     if (!selectedExpenseForOffset || !targetPaymentIdForOffset) return;
     setIsSubmitting(true);
@@ -345,11 +352,14 @@ export default function Home() {
 
     const currentPaid = targetPayment.paid_amount || 0;
     const remainingToPay = targetEvent.amount - currentPaid;
-    const expenseAmountVal = selectedExpenseForOffset.amount;
-    const expenseItemName = selectedExpenseForOffset.title;
+    const currentSettled = selectedExpenseForOffset.settled_amount || 0;
+    const availableExpense = selectedExpenseForOffset.amount - currentSettled;
 
-    if (expenseAmountVal >= remainingToPay) {
-      // 請求完済
+    if (availableExpense >= remainingToPay) {
+      // 請求を完済。立替は remainingToPay だけ充当
+      const newSettled = currentSettled + remainingToPay;
+      const isExpenseFullySettled = newSettled >= selectedExpenseForOffset.amount;
+
       await supabase
         .from('payments')
         .update({
@@ -363,34 +373,24 @@ export default function Home() {
       await supabase
         .from('expenses')
         .update({
-          status: '精算済',
+          status: isExpenseFullySettled ? '精算済' : '一部精算',
+          settled_amount: newSettled,
           offset_payment_id: targetPayment.id,
-          reject_reason: `相殺: ${targetEvent.title}`,
+          reject_reason: `相殺: ${targetEvent.title} (充当 ¥${remainingToPay.toLocaleString()})`,
         })
         .eq('id', selectedExpenseForOffset.id);
 
-      const diff = expenseAmountVal - remainingToPay;
-      if (diff > 0) {
-        await supabase.from('expenses').insert({
-          member_id: selectedExpenseForOffset.member_id,
-          title: `${expenseItemName} (残額)`,
-          amount: diff,
-          category: selectedExpenseForOffset.category,
-          receipt_url: selectedExpenseForOffset.receipt_url || '',
-          status: '未精算',
-          reject_reason: `元申請 ¥${expenseAmountVal.toLocaleString()}`,
-        });
-      }
       alert('相殺しました');
     } else {
-      // 一部納入
-      const newPaidAmount = currentPaid + expenseAmountVal;
+      // 立替を全額充当し、請求は一部納入
+      const newPaid = currentPaid + availableExpense;
+
       await supabase
         .from('payments')
         .update({
           status: '一部納入',
-          paid_amount: newPaidAmount,
-          payment_method: `相殺 (${expenseItemName})`,
+          paid_amount: newPaid,
+          payment_method: `相殺 (${selectedExpenseForOffset.title})`,
           offset_expense_id: selectedExpenseForOffset.id,
         })
         .eq('id', targetPayment.id);
@@ -399,12 +399,13 @@ export default function Home() {
         .from('expenses')
         .update({
           status: '精算済',
+          settled_amount: selectedExpenseForOffset.amount,
           offset_payment_id: targetPayment.id,
-          reject_reason: `一部相殺: ${targetEvent.title}`,
+          reject_reason: `相殺: ${targetEvent.title} (充当 ¥${availableExpense.toLocaleString()})`,
         })
         .eq('id', selectedExpenseForOffset.id);
 
-      alert(`相殺しました（残額: ¥${(targetEvent.amount - newPaidAmount).toLocaleString()}）`);
+      alert(`相殺しました（残額: ¥${(targetEvent.amount - newPaid).toLocaleString()}）`);
     }
 
     setShowOffsetModal(false);
@@ -421,6 +422,7 @@ export default function Home() {
       .from('expenses')
       .update({
         status: '精算済',
+        settled_amount: expense.amount,
         reject_reason: '現金精算',
       })
       .eq('id', expense.id);
@@ -434,30 +436,24 @@ export default function Home() {
     fetchData();
   };
 
-  // 8. 立替取消（双方向巻き戻し）
+  // 8. 立替取消（双方向完全巻き戻し）
   const handleRevertExpense = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」を未精算に戻しますか？\n（相殺されていた請求も連動して未納に戻ります）`)) {
+    if (!confirm(`「${expense.title}」を未精算に戻しますか？\n（相殺されていた請求も未納に戻ります）`)) {
       return;
     }
 
-    // 紐づく請求を探す
     const linkedPayment = payments.find(
       (p) => p.id === expense.offset_payment_id || p.offset_expense_id === expense.id
     );
 
     if (linkedPayment) {
-      const ev = events.find((e) => e.id === linkedPayment.billing_event_id);
-      const total = ev?.amount || 0;
-      const revertedPaid = Math.max(0, (linkedPayment.paid_amount || 0) - expense.amount);
-      const nextStatus = revertedPaid === 0 ? '未納' : revertedPaid >= total ? '支払済' : '一部納入';
-
       await supabase
         .from('payments')
         .update({
-          status: nextStatus,
-          paid_amount: revertedPaid,
-          payment_method: nextStatus === '未納' ? '現金/振込' : linkedPayment.payment_method,
-          offset_expense_id: nextStatus === '未納' ? null : linkedPayment.offset_expense_id,
+          status: '未納',
+          paid_amount: 0,
+          payment_method: '現金/振込',
+          offset_expense_id: null,
         })
         .eq('id', linkedPayment.id);
     }
@@ -466,6 +462,7 @@ export default function Home() {
       .from('expenses')
       .update({
         status: '未精算',
+        settled_amount: 0,
         reject_reason: '',
         offset_payment_id: null,
       })
@@ -476,7 +473,7 @@ export default function Home() {
 
   // CSVダウンロード
   const exportToCSV = () => {
-    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額', '残額', '状態', '日付'];
+    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額/充当額', '残額', '状態', '日付'];
     const rows: string[][] = [];
 
     payments.forEach((p) => {
@@ -513,14 +510,16 @@ export default function Home() {
 
     expenses.forEach((e) => {
       const mem = members.find((m) => m.id === e.member_id);
+      const total = e.amount;
+      const settled = e.settled_amount || 0;
       rows.push([
         '立替',
         e.category,
         mem?.name || '',
         e.title,
-        String(e.amount),
-        '-',
-        '-',
+        String(total),
+        String(settled),
+        String(Math.max(0, total - settled)),
         `${e.status} ${e.reject_reason || ''}`,
         e.created_at?.split('T')[0] || '',
       ]);
@@ -642,7 +641,6 @@ export default function Home() {
                       <h2 className="font-black text-xs text-slate-500 uppercase">
                         {currentMember ? `${currentMember.name}の請求` : '請求状況'}
                       </h2>
-                      {/* 請求フィルター */}
                       <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
                         <button
                           onClick={() => setPaymentFilter('unpaid')}
@@ -735,7 +733,6 @@ export default function Home() {
                       <h2 className="font-black text-xs text-slate-500 uppercase">
                         {currentMember ? `${currentMember.name}の立替` : '立替一覧'}
                       </h2>
-                      {/* 立替フィルター */}
                       <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
                         <button
                           onClick={() => setExpenseFilter('unsettled')}
@@ -761,7 +758,7 @@ export default function Home() {
                     {expenses
                       .filter((e) => !currentMember || e.member_id === currentMember.id)
                       .filter((e) => {
-                        if (expenseFilter === 'unsettled') return e.status === '未精算';
+                        if (expenseFilter === 'unsettled') return e.status !== '精算済';
                         if (expenseFilter === 'settled') return e.status === '精算済';
                         return true;
                       })
@@ -771,7 +768,7 @@ export default function Home() {
                       expenses
                         .filter((e) => !currentMember || e.member_id === currentMember.id)
                         .filter((e) => {
-                          if (expenseFilter === 'unsettled') return e.status === '未精算';
+                          if (expenseFilter === 'unsettled') return e.status !== '精算済';
                           if (expenseFilter === 'settled') return e.status === '精算済';
                           return true;
                         })
@@ -779,6 +776,8 @@ export default function Home() {
                           const member = members.find((m) => m.id === e.member_id);
                           const memberUnpaid = payments.filter((p) => p.member_id === e.member_id && p.status !== '支払済');
                           const canOffset = memberUnpaid.length > 0;
+                          const currentSettled = e.settled_amount || 0;
+                          const remainingExpense = Math.max(0, e.amount - currentSettled);
 
                           return (
                             <div key={e.id} className="p-3 border border-slate-100 rounded-xl bg-slate-50 space-y-2.5">
@@ -810,6 +809,11 @@ export default function Home() {
                                   <p className="font-bold text-xs text-slate-800 truncate mt-0.5">{e.title}</p>
                                   <p className="text-sm font-black text-slate-900 tabular-nums">
                                     ¥{e.amount.toLocaleString()}
+                                    {e.status === '一部精算' && (
+                                      <span className="text-xs text-amber-700 font-bold ml-1.5">
+                                        (残 ¥{remainingExpense.toLocaleString()})
+                                      </span>
+                                    )}
                                   </p>
                                 </div>
 
@@ -818,7 +822,9 @@ export default function Home() {
                                     className={`text-[10px] px-2 py-1 rounded-md font-black ${
                                       e.status === '精算済'
                                         ? 'bg-slate-200 text-slate-600'
-                                        : 'bg-amber-100 text-amber-800 border border-amber-200'
+                                        : e.status === '一部精算'
+                                        ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                        : 'bg-blue-100 text-blue-800 border border-blue-200'
                                     }`}
                                   >
                                     {e.status}
@@ -832,7 +838,7 @@ export default function Home() {
                                 </div>
                               )}
 
-                              {e.status === '未精算' && (
+                              {e.status !== '精算済' && (
                                 <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-200">
                                   <button
                                     onClick={() => {
@@ -867,7 +873,7 @@ export default function Home() {
                                 </div>
                               )}
 
-                              {e.status === '精算済' && (
+                              {e.status !== '未精算' && (
                                 <div className="flex justify-end pt-1">
                                   <button
                                     onClick={() => handleRevertExpense(e)}
@@ -924,7 +930,6 @@ export default function Home() {
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {/* カテゴリ別 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                     <div className="flex justify-between items-center">
                       <h2 className="font-black text-xs text-slate-500 uppercase">支出カテゴリ別</h2>
@@ -956,7 +961,6 @@ export default function Home() {
                     )}
                   </section>
 
-                  {/* 明細 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                     <h2 className="font-black text-xs text-slate-500 uppercase">支出明細</h2>
                     <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
@@ -1010,7 +1014,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* TAB 3: 部員カルテ */}
+            {/* TAB 3: 部員一覧 */}
             {activeTab === 'members' && (
               <div className="space-y-3">
                 <p className="text-xs text-slate-500">部員を選択すると個別の履歴を確認できます</p>
@@ -1524,7 +1528,9 @@ export default function Home() {
             <h3 className="font-black text-base text-slate-800">立替金を部費へ相殺</h3>
             <div className="bg-amber-50 p-3 rounded-xl text-xs text-amber-900 border border-amber-200 space-y-0.5">
               <p>立替: <span className="font-bold">{selectedExpenseForOffset.title}</span></p>
-              <p className="font-bold">金額: ¥{selectedExpenseForOffset.amount.toLocaleString()}</p>
+              <p className="font-bold">
+                充当可能額: ¥{(selectedExpenseForOffset.amount - (selectedExpenseForOffset.settled_amount || 0)).toLocaleString()}
+              </p>
             </div>
 
             <div>
@@ -1554,8 +1560,8 @@ export default function Home() {
               const targetE = events.find((e) => e.id === targetP?.billing_event_id);
               if (!targetE) return null;
               const remainingToPay = targetE.amount - (targetP?.paid_amount || 0);
-              const eAmt = selectedExpenseForOffset.amount;
-              const diff = eAmt - remainingToPay;
+              const availableExpense = selectedExpenseForOffset.amount - (selectedExpenseForOffset.settled_amount || 0);
+              const diff = availableExpense - remainingToPay;
 
               return (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">

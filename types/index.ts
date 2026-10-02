@@ -32,7 +32,8 @@ export interface Expense {
   amount: number;
   category: string;
   receipt_url?: string;
-  status: '未精算' | '精算済';
+  status: '未精算' | '精算済' | '一部精算';
+  settled_amount?: number;
   reject_reason?: string;
   offset_payment_id?: string;
   created_at?: string;
