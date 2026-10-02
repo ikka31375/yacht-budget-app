@@ -33,6 +33,7 @@ export default function Home() {
   // フィルター
   const [paymentFilter, setPaymentFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
   const [expenseFilter, setExpenseFilter] = useState<'unsettled' | 'settled' | 'all'>('unsettled');
+  const [clubTxViewMode, setClubTxViewMode] = useState<'expense' | 'income'>('expense');
 
   // モーダル
   const [showEventModal, setShowEventModal] = useState(false);
@@ -70,7 +71,7 @@ export default function Home() {
   const [txSource, setTxSource] = useState<'部口座振込' | '部室現金'>('部口座振込');
   const [txEventTag, setTxEventTag] = useState('');
 
-  // フォーム: 相殺
+  // フォーム: 相殺（自動MAX初期値）
   const [selectedExpenseForOffset, setSelectedExpenseForOffset] = useState<Expense | null>(null);
   const [targetPaymentIdForOffset, setTargetPaymentIdForOffset] = useState<string>('');
   const [offsetCustomAmount, setOffsetCustomAmount] = useState<string>('');
@@ -153,6 +154,7 @@ export default function Home() {
   const estimatedClubTreasury =
     totalCollectedDues + totalClubDonations - totalDirectClubExpenses - totalReimbursedExpenses;
 
+  // 支出カテゴリ別集計
   const categorySpendingMap: { [cat: string]: number } = {};
   clubTransactions
     .filter((t) => t.type === '支出')
@@ -164,8 +166,17 @@ export default function Home() {
     .forEach((e) => {
       categorySpendingMap[e.category] = (categorySpendingMap[e.category] || 0) + (e.settled_amount || 0);
     });
-
   const totalAllExpenses = Object.values(categorySpendingMap).reduce((a, b) => a + b, 0);
+
+  // 収入カテゴリ別集計
+  const categoryIncomeMap: { [cat: string]: number } = {};
+  categoryIncomeMap['部費納入 (現金/振込)'] = totalCollectedDues;
+  clubTransactions
+    .filter((t) => t.type === '収入')
+    .forEach((t) => {
+      categoryIncomeMap[t.category] = (categoryIncomeMap[t.category] || 0) + t.amount;
+    });
+  const totalAllIncomes = Object.values(categoryIncomeMap).reduce((a, b) => a + b, 0);
 
   // 画像圧縮
   const compressImage = (file: File): Promise<Blob> => {
@@ -188,7 +199,7 @@ export default function Home() {
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(img, 0, 0, width, height);
-        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('圧縮失敗'))), 'image/jpeg', 0.7);
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('圧縮失敗'))), 'image/jpeg', 0.8);
       };
       img.onerror = (err) => reject(err);
     });
@@ -206,6 +217,35 @@ export default function Home() {
     setReceiptFile(null);
     setLocalReceiptPreview(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // 相殺モーダルを開く際の自動MAX計算
+  const openOffsetModalForExpense = (expense: Expense) => {
+    setSelectedExpenseForOffset(expense);
+    const memberUnpaid = payments.filter((p) => p.member_id === expense.member_id && p.status !== '支払済');
+    if (memberUnpaid.length > 0) {
+      const firstTarget = memberUnpaid[0];
+      setTargetPaymentIdForOffset(firstTarget.id);
+      const ev = events.find((e) => e.id === firstTarget.billing_event_id);
+      const remainingPayment = (ev?.amount || 0) - (firstTarget.paid_amount || 0);
+      const remainingExpense = expense.amount - (expense.settled_amount || 0);
+      const maxVal = Math.min(remainingPayment, remainingExpense);
+      setOffsetCustomAmount(String(maxVal));
+    }
+    setShowOffsetModal(true);
+  };
+
+  // 相殺充当先の変更時にMAX額を自動再セット
+  const handleTargetPaymentChange = (paymentId: string) => {
+    setTargetPaymentIdForOffset(paymentId);
+    if (selectedExpenseForOffset) {
+      const targetP = payments.find((p) => p.id === paymentId);
+      const ev = events.find((e) => e.id === targetP?.billing_event_id);
+      const remainingPayment = (ev?.amount || 0) - (targetP?.paid_amount || 0);
+      const remainingExpense = selectedExpenseForOffset.amount - (selectedExpenseForOffset.settled_amount || 0);
+      const maxVal = Math.min(remainingPayment, remainingExpense);
+      setOffsetCustomAmount(String(maxVal));
+    }
   };
 
   // 1. 請求作成
@@ -252,14 +292,10 @@ export default function Home() {
     fetchData();
   };
 
-  // 【新機能】請求イベント丸ごと削除（未納のみ許可する安全ガード付き）
+  // 請求イベント丸ごと削除
   const handleDeleteBillingEvent = async (event: BillingEvent) => {
     const eventPayments = payments.filter((p) => p.billing_event_id === event.id);
-    
-    // 納入済み・一部納入があるかチェック
     const paidRecords = eventPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0);
-    
-    // 相殺に使われているかチェック
     const isUsedInOffset = offsetTransactions.some((o) => eventPayments.some((p) => p.id === o.payment_id));
 
     if (paidRecords.length > 0 || isUsedInOffset) {
@@ -279,9 +315,7 @@ export default function Home() {
     }
 
     setIsSubmitting(true);
-    // 紐づく payments を削除
     await supabase.from('payments').delete().eq('billing_event_id', event.id);
-    // billing_events を削除
     await supabase.from('billing_events').delete().eq('id', event.id);
 
     alert(`請求「${event.title}」を削除しました`);
@@ -289,7 +323,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 【新機能】特定部員の請求個別除外（誤って請求対象に含めてしまった場合の解除）
+  // 特定部員の請求個別除外
   const handleDeleteIndividualPayment = async (payment: Payment) => {
     if (payment.status !== '未納' || (payment.paid_amount || 0) > 0) {
       alert('納入済または相殺済みの請求は除外できません。未納に戻してから操作してください。');
@@ -307,7 +341,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 2. 個人立替申請
+  // 2. 個人立替申請（画像保存エラーハンドリング強化）
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedMemberId) {
@@ -325,18 +359,26 @@ export default function Home() {
         const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
         const { error: uploadError } = await supabase.storage
           .from('receipts')
-          .upload(fileName, compressedBlob, { contentType: 'image/jpeg' });
+          .upload(fileName, compressedBlob, {
+            contentType: 'image/jpeg',
+            cacheControl: '3600',
+            upsert: false,
+          });
 
-        if (!uploadError) {
+        if (uploadError) {
+          console.error('Storageアップロードエラー詳細:', uploadError);
+          alert(`画像の保存に失敗しました: ${uploadError.message}\n（文字のみで申請を続行します）`);
+        } else {
           const { data: publicUrlData } = supabase.storage.from('receipts').getPublicUrl(fileName);
           receiptUrl = publicUrlData.publicUrl;
         }
-      } catch (err) {
-        console.error('画像保存エラー:', err);
+      } catch (err: any) {
+        console.error('画像圧縮またはアップロード例外:', err);
+        alert(`画像処理中にエラーが発生しました: ${err.message || err}`);
       }
     }
 
-    await supabase.from('expenses').insert({
+    const { error: insertError } = await supabase.from('expenses').insert({
       member_id: selectedMemberId,
       title: expenseTitle,
       amount: parseInt(expenseAmount, 10),
@@ -345,6 +387,12 @@ export default function Home() {
       status: '未精算',
       settled_amount: 0,
     });
+
+    if (insertError) {
+      alert(`申請の保存に失敗しました: ${insertError.message}`);
+      setIsSubmitting(false);
+      return;
+    }
 
     setExpenseTitle('');
     setExpenseAmount('');
@@ -843,7 +891,6 @@ export default function Home() {
                                   {p.status === '一部納入' ? `残 ¥${remainingAmount.toLocaleString()}` : p.status}
                                 </button>
 
-                                {/* 未納の場合のみ、個別に請求除外できるボタン */}
                                 {p.status === '未納' && paidAmount === 0 && (
                                   <button
                                     onClick={() => handleDeleteIndividualPayment(p)}
@@ -918,13 +965,21 @@ export default function Home() {
                                 {e.receipt_url ? (
                                   <div
                                     onClick={() => setPreviewImageUrl(e.receipt_url || null)}
-                                    className="w-16 h-16 rounded-xl bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer"
+                                    className="w-16 h-16 rounded-xl bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer relative group"
                                   >
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
                                     <img
                                       src={e.receipt_url}
                                       alt="レシート"
-                                      className="w-full h-full object-cover"
+                                      className="w-full h-full object-cover group-hover:scale-105 transition"
+                                      onError={(err) => {
+                                        // 画像ロード失敗時のフォールバック
+                                        (err.target as HTMLElement).style.display = 'none';
+                                      }}
                                     />
+                                    <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-[10px] text-white font-bold">
+                                      拡大
+                                    </div>
                                   </div>
                                 ) : (
                                   <div className="w-16 h-16 rounded-xl bg-slate-100 shrink-0 border border-slate-200 flex flex-col items-center justify-center text-slate-400 text-xs font-bold">
@@ -975,13 +1030,7 @@ export default function Home() {
                               {e.status !== '精算済' && (
                                 <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200">
                                   <button
-                                    onClick={() => {
-                                      if (!canOffset) return;
-                                      setSelectedExpenseForOffset(e);
-                                      setTargetPaymentIdForOffset(memberUnpaid[0].id);
-                                      setOffsetCustomAmount('');
-                                      setShowOffsetModal(true);
-                                    }}
+                                    onClick={() => openOffsetModalForExpense(e)}
                                     disabled={!canOffset}
                                     className={`py-2 text-xs font-bold rounded-xl transition ${
                                       canOffset
@@ -1027,7 +1076,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* TAB 2: 全体会計 */}
+            {/* TAB 2: 全体会計（★ 支出・収入のカテゴリ別＆明細を完全装備） */}
             {activeTab === 'club' && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1040,13 +1089,13 @@ export default function Home() {
                       <div>
                         <span className="text-slate-400 text-xs block">現金の総入金（部費+寄付）</span>
                         <span className="font-bold text-emerald-400 tabular-nums text-base">
-                          +¥{(totalCollectedDues + totalClubDonations).toLocaleString()}
+                          +¥{totalAllIncomes.toLocaleString()}
                         </span>
                       </div>
                       <div>
                         <span className="text-slate-400 text-xs block">現金の総出金（部支出+精算）</span>
                         <span className="font-bold text-rose-400 tabular-nums text-base">
-                          -¥{(totalDirectClubExpenses + totalReimbursedExpenses).toLocaleString()}
+                          -¥{totalAllExpenses.toLocaleString()}
                         </span>
                       </div>
                     </div>
@@ -1064,88 +1113,200 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
-                    <div className="flex justify-between items-center">
-                      <h2 className="font-black text-sm text-slate-600 uppercase">支出カテゴリ別</h2>
-                      <span className="text-sm font-bold text-slate-800 tabular-nums">
-                        計: ¥{totalAllExpenses.toLocaleString()}
-                      </span>
-                    </div>
-                    {totalAllExpenses === 0 ? (
-                      <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
-                    ) : (
-                      <div className="space-y-3">
-                        {Object.entries(categorySpendingMap).map(([cat, amt]) => {
-                          const percent = Math.round((amt / totalAllExpenses) * 100);
-                          return (
-                            <div key={cat} className="space-y-1">
-                              <div className="flex justify-between text-xs sm:text-sm font-semibold">
-                                <span className="text-slate-700">{cat}</span>
-                                <span className="text-slate-900 tabular-nums">
-                                  ¥{amt.toLocaleString()} ({percent}%)
-                                </span>
-                              </div>
-                              <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
-                                <div className="bg-blue-600 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
-                              </div>
-                            </div>
-                          );
-                        })}
+                {/* 支出 / 収入 表示切り替えタブ */}
+                <div className="flex bg-slate-200/80 p-1 rounded-2xl text-sm font-bold max-w-sm mx-auto">
+                  <button
+                    onClick={() => setClubTxViewMode('expense')}
+                    className={`flex-1 py-2 rounded-xl transition ${
+                      clubTxViewMode === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    支出の内訳・明細 (-¥{totalAllExpenses.toLocaleString()})
+                  </button>
+                  <button
+                    onClick={() => setClubTxViewMode('income')}
+                    className={`flex-1 py-2 rounded-xl transition ${
+                      clubTxViewMode === 'income' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
+                    }`}
+                  >
+                    収入の内訳・明細 (+¥{totalAllIncomes.toLocaleString()})
+                  </button>
+                </div>
+
+                {/* 支出ビュー */}
+                {clubTxViewMode === 'expense' && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+                      <div className="flex justify-between items-center">
+                        <h2 className="font-black text-sm text-slate-600 uppercase">支出カテゴリ別</h2>
+                        <span className="text-sm font-bold text-rose-600 tabular-nums">
+                          計: -¥{totalAllExpenses.toLocaleString()}
+                        </span>
                       </div>
-                    )}
-                  </section>
-
-                  <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <h2 className="font-black text-sm text-slate-600 uppercase">支出明細</h2>
-                    <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                      {clubTransactions
-                        .filter((t) => t.type === '支出')
-                        .map((t) => (
-                          <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md font-bold">
-                                  部費出納
-                                </span>
-                                <span className="text-sm font-bold text-slate-800">{t.title}</span>
+                      {totalAllExpenses === 0 ? (
+                        <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {Object.entries(categorySpendingMap).map(([cat, amt]) => {
+                            const percent = Math.round((amt / totalAllExpenses) * 100);
+                            return (
+                              <div key={cat} className="space-y-1">
+                                <div className="flex justify-between text-xs sm:text-sm font-semibold">
+                                  <span className="text-slate-700">{cat}</span>
+                                  <span className="text-slate-900 tabular-nums">
+                                    ¥{amt.toLocaleString()} ({percent}%)
+                                  </span>
+                                </div>
+                                <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
+                                  <div className="bg-rose-500 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
+                                </div>
                               </div>
-                              <p className="text-xs text-slate-500 mt-1">
-                                {t.category} | {t.payment_source}
-                              </p>
-                            </div>
-                            <span className="text-sm font-black tabular-nums text-slate-800">
-                              -¥{t.amount.toLocaleString()}
-                            </span>
-                          </div>
-                        ))}
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
 
-                      {expenses
-                        .filter((e) => (e.settled_amount || 0) > 0)
-                        .map((e) => {
-                          const mem = members.find((m) => m.id === e.member_id);
-                          return (
-                            <div key={e.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+                      <h2 className="font-black text-sm text-slate-600 uppercase">支出明細（何に使ったか）</h2>
+                      <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                        {clubTransactions
+                          .filter((t) => t.type === '支出')
+                          .map((t) => (
+                            <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
                               <div>
                                 <div className="flex items-center gap-2">
-                                  <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md font-bold">
-                                    立替充当・精算
+                                  <span className="text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md font-bold">
+                                    部費出納
                                   </span>
-                                  <span className="text-sm font-bold text-slate-800">{e.title}</span>
+                                  <span className="text-sm font-bold text-slate-800">{t.title}</span>
                                 </div>
                                 <p className="text-xs text-slate-500 mt-1">
-                                  {e.category} | {mem?.name}
+                                  {t.category} | {t.payment_source} {t.event_tag && `[${t.event_tag}]`}
                                 </p>
                               </div>
-                              <span className="text-sm font-black tabular-nums text-slate-800">
-                                -¥{(e.settled_amount || 0).toLocaleString()}
+                              <span className="text-sm font-black tabular-nums text-rose-600">
+                                -¥{t.amount.toLocaleString()}
                               </span>
                             </div>
-                          );
-                        })}
-                    </div>
-                  </section>
-                </div>
+                          ))}
+
+                        {expenses
+                          .filter((e) => (e.settled_amount || 0) > 0)
+                          .map((e) => {
+                            const mem = members.find((m) => m.id === e.member_id);
+                            return (
+                              <div key={e.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md font-bold">
+                                      立替充当・精算
+                                    </span>
+                                    <span className="text-sm font-bold text-slate-800">{e.title}</span>
+                                  </div>
+                                  <p className="text-xs text-slate-500 mt-1">
+                                    {e.category} | {mem?.name}
+                                  </p>
+                                </div>
+                                <span className="text-sm font-black tabular-nums text-rose-600">
+                                  -¥{(e.settled_amount || 0).toLocaleString()}
+                                </span>
+                              </div>
+                            );
+                          })}
+                      </div>
+                    </section>
+                  </div>
+                )}
+
+                {/* 収入ビュー */}
+                {clubTxViewMode === 'income' && (
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+                      <div className="flex justify-between items-center">
+                        <h2 className="font-black text-sm text-slate-600 uppercase">収入カテゴリ別</h2>
+                        <span className="text-sm font-bold text-emerald-600 tabular-nums">
+                          計: +¥{totalAllIncomes.toLocaleString()}
+                        </span>
+                      </div>
+                      {totalAllIncomes === 0 ? (
+                        <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
+                      ) : (
+                        <div className="space-y-3">
+                          {Object.entries(categoryIncomeMap).map(([cat, amt]) => {
+                            const percent = Math.round((amt / totalAllIncomes) * 100);
+                            return (
+                              <div key={cat} className="space-y-1">
+                                <div className="flex justify-between text-xs sm:text-sm font-semibold">
+                                  <span className="text-slate-700">{cat}</span>
+                                  <span className="text-slate-900 tabular-nums">
+                                    ¥{amt.toLocaleString()} ({percent}%)
+                                  </span>
+                                </div>
+                                <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
+                                  <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
+
+                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+                      <h2 className="font-black text-sm text-slate-600 uppercase">収入明細（入金履歴）</h2>
+                      <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                        {/* 1. 部費の納入レコード */}
+                        {payments
+                          .filter((p) => (p.paid_amount || 0) > 0 && p.payment_method !== '相殺')
+                          .map((p) => {
+                            const ev = events.find((e) => e.id === p.billing_event_id);
+                            const mem = members.find((m) => m.id === p.member_id);
+                            return (
+                              <div key={p.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                                <div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
+                                      部費納入
+                                    </span>
+                                    <span className="text-sm font-bold text-slate-800">{ev?.title}</span>
+                                  </div>
+                                  <p className="text-xs text-slate-500 mt-1">
+                                    納入者: {mem?.name} | {p.payment_method}
+                                  </p>
+                                </div>
+                                <span className="text-sm font-black tabular-nums text-emerald-600">
+                                  +¥{(p.paid_amount || 0).toLocaleString()}
+                                </span>
+                              </div>
+                            );
+                          })}
+
+                        {/* 2. 直接の寄付金・助成金レコード */}
+                        {clubTransactions
+                          .filter((t) => t.type === '収入')
+                          .map((t) => (
+                            <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                              <div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
+                                    寄付・支援
+                                  </span>
+                                  <span className="text-sm font-bold text-slate-800">{t.title}</span>
+                                </div>
+                                <p className="text-xs text-slate-500 mt-1">
+                                  {t.category} | {t.payment_source} {t.event_tag && `[${t.event_tag}]`}
+                                </p>
+                              </div>
+                              <span className="text-sm font-black tabular-nums text-emerald-600">
+                                +¥{t.amount.toLocaleString()}
+                              </span>
+                            </div>
+                          ))}
+                      </div>
+                    </section>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1246,7 +1407,7 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* モーダル: 請求イベント管理（★ 請求一括削除機能） */}
+      {/* モーダル: 請求イベント管理 */}
       {showEventManageModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
@@ -1807,7 +1968,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* モーダル: 相殺 */}
+      {/* モーダル: 相殺（★ 自動MAX初期値） */}
       {showOffsetModal && selectedExpenseForOffset && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl">
@@ -1823,7 +1984,7 @@ export default function Home() {
               <label className="text-xs text-slate-600 font-bold block mb-1">充当先の未納請求</label>
               <select
                 value={targetPaymentIdForOffset}
-                onChange={(e) => setTargetPaymentIdForOffset(e.target.value)}
+                onChange={(e) => handleTargetPaymentChange(e.target.value)}
                 className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
               >
                 {payments
@@ -1841,13 +2002,13 @@ export default function Home() {
             </div>
 
             <div>
-              <label className="text-xs text-slate-600 font-bold block mb-1">相殺金額 (未入力で最大額)</label>
+              <label className="text-xs text-slate-600 font-bold block mb-1">相殺金額（最大額を自動入力済）</label>
               <input
                 type="number"
                 placeholder="例: 3000"
                 value={offsetCustomAmount}
                 onChange={(e) => setOffsetCustomAmount(e.target.value)}
-                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-sm font-black tabular-nums text-slate-900"
               />
             </div>
 
