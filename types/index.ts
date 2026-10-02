@@ -3,7 +3,7 @@ export interface Member {
   name: string;
   grade: number;
   role: string;
-  deposit_balance: number;
+  deposit_balance?: number;
 }
 
 export interface BillingEvent {
@@ -11,6 +11,8 @@ export interface BillingEvent {
   title: string;
   amount: number;
   due_date: string;
+  type?: string;
+  created_at?: string;
 }
 
 export interface Payment {
@@ -18,7 +20,7 @@ export interface Payment {
   billing_event_id: string;
   member_id: string;
   status: '未納' | '支払済';
-  payment_method?: '現金/振込' | '相殺' | 'デポジット';
+  payment_method?: string;
   offset_expense_id?: string;
 }
 
