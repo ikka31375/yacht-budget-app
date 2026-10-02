@@ -36,6 +36,7 @@ export default function Home() {
 
   // モーダル
   const [showEventModal, setShowEventModal] = useState(false);
+  const [showEventManageModal, setShowEventManageModal] = useState(false);
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showClubTxModal, setShowClubTxModal] = useState(false);
   const [showOffsetModal, setShowOffsetModal] = useState(false);
@@ -248,6 +249,61 @@ export default function Home() {
     setEventDueDate('');
     setShowEventModal(false);
     setIsSubmitting(false);
+    fetchData();
+  };
+
+  // 【新機能】請求イベント丸ごと削除（未納のみ許可する安全ガード付き）
+  const handleDeleteBillingEvent = async (event: BillingEvent) => {
+    const eventPayments = payments.filter((p) => p.billing_event_id === event.id);
+    
+    // 納入済み・一部納入があるかチェック
+    const paidRecords = eventPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0);
+    
+    // 相殺に使われているかチェック
+    const isUsedInOffset = offsetTransactions.some((o) => eventPayments.some((p) => p.id === o.payment_id));
+
+    if (paidRecords.length > 0 || isUsedInOffset) {
+      const paidMemberNames = paidRecords
+        .map((p) => members.find((m) => m.id === p.member_id)?.name)
+        .filter(Boolean)
+        .join('、');
+
+      alert(
+        `この請求は削除できません。\n既に納入または相殺を行っている部員（${paidMemberNames || '相殺履歴あり'}）がいます。\n先に「相殺履歴」の取消や「未納に戻す」操作を行ってください。`
+      );
+      return;
+    }
+
+    if (!confirm(`請求「${event.title}」(¥${event.amount.toLocaleString()}) を完全に削除しますか？\n（対象部員の請求レコードも一括削除されます）`)) {
+      return;
+    }
+
+    setIsSubmitting(true);
+    // 紐づく payments を削除
+    await supabase.from('payments').delete().eq('billing_event_id', event.id);
+    // billing_events を削除
+    await supabase.from('billing_events').delete().eq('id', event.id);
+
+    alert(`請求「${event.title}」を削除しました`);
+    setIsSubmitting(false);
+    fetchData();
+  };
+
+  // 【新機能】特定部員の請求個別除外（誤って請求対象に含めてしまった場合の解除）
+  const handleDeleteIndividualPayment = async (payment: Payment) => {
+    if (payment.status !== '未納' || (payment.paid_amount || 0) > 0) {
+      alert('納入済または相殺済みの請求は除外できません。未納に戻してから操作してください。');
+      return;
+    }
+
+    const ev = events.find((e) => e.id === payment.billing_event_id);
+    const mem = members.find((m) => m.id === payment.member_id);
+
+    if (!confirm(`${mem?.name} さんの「${ev?.title}」請求を除外（削除）しますか？`)) {
+      return;
+    }
+
+    await supabase.from('payments').delete().eq('id', payment.id);
     fetchData();
   };
 
@@ -600,6 +656,12 @@ export default function Home() {
             </h1>
             <div className="flex gap-2">
               <button
+                onClick={() => setShowEventManageModal(true)}
+                className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-3 py-1.5 rounded-xl font-bold transition"
+              >
+                請求管理
+              </button>
+              <button
                 onClick={() => setShowOffsetHistoryModal(true)}
                 className="text-xs sm:text-sm bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-xl font-bold transition"
               >
@@ -767,18 +829,31 @@ export default function Home() {
                                 )}
                               </div>
 
-                              <button
-                                onClick={() => setConfirmPaymentTarget(p)}
-                                className={`text-xs sm:text-sm px-3.5 py-2 rounded-xl font-bold transition shadow-sm ${
-                                  p.status === '支払済'
-                                    ? 'bg-green-100 text-green-700 border border-green-300'
-                                    : p.status === '一部納入'
-                                    ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                                    : 'bg-red-50 text-red-600 border border-red-200'
-                                }`}
-                              >
-                                {p.status === '一部納入' ? `残 ¥${remainingAmount.toLocaleString()}` : p.status}
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => setConfirmPaymentTarget(p)}
+                                  className={`text-xs sm:text-sm px-3.5 py-2 rounded-xl font-bold transition shadow-sm ${
+                                    p.status === '支払済'
+                                      ? 'bg-green-100 text-green-700 border border-green-300'
+                                      : p.status === '一部納入'
+                                      ? 'bg-amber-100 text-amber-800 border border-amber-300'
+                                      : 'bg-red-50 text-red-600 border border-red-200'
+                                  }`}
+                                >
+                                  {p.status === '一部納入' ? `残 ¥${remainingAmount.toLocaleString()}` : p.status}
+                                </button>
+
+                                {/* 未納の場合のみ、個別に請求除外できるボタン */}
+                                {p.status === '未納' && paidAmount === 0 && (
+                                  <button
+                                    onClick={() => handleDeleteIndividualPayment(p)}
+                                    title="この部員の請求を除外"
+                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                                  >
+                                    ✕
+                                  </button>
+                                )}
+                              </div>
                             </div>
                           );
                         })
@@ -1171,6 +1246,76 @@ export default function Home() {
         </div>
       </nav>
 
+      {/* モーダル: 請求イベント管理（★ 請求一括削除機能） */}
+      {showEventManageModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-5 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
+            <div className="flex justify-between items-center border-b pb-3">
+              <div>
+                <h3 className="font-black text-base text-slate-800">請求イベント管理</h3>
+                <p className="text-xs text-slate-400">作成した部費・集金イベントの確認と削除</p>
+              </div>
+              <button onClick={() => setShowEventManageModal(false)} className="text-slate-400 font-bold text-lg">
+                ✕
+              </button>
+            </div>
+
+            {events.length === 0 ? (
+              <p className="text-sm text-slate-400 text-center py-6">作成された請求はありません</p>
+            ) : (
+              <div className="space-y-3">
+                {events.map((ev) => {
+                  const evPayments = payments.filter((p) => p.billing_event_id === ev.id);
+                  const paidCount = evPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0).length;
+                  const canDelete = paidCount === 0;
+
+                  return (
+                    <div key={ev.id} className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="font-bold text-sm text-slate-900">{ev.title}</p>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            期日: {ev.due_date} | 請求対象: {evPayments.length}名
+                          </p>
+                        </div>
+                        <span className="text-sm font-black text-slate-800 tabular-nums">
+                          ¥{ev.amount.toLocaleString()}
+                        </span>
+                      </div>
+
+                      <div className="flex justify-between items-center pt-2 border-t border-slate-200">
+                        <span className={`text-xs font-bold ${canDelete ? 'text-slate-500' : 'text-emerald-700'}`}>
+                          {canDelete ? '未納 100% (削除可)' : `${paidCount}名が納入・相殺済`}
+                        </span>
+
+                        <button
+                          onClick={() => handleDeleteBillingEvent(ev)}
+                          disabled={!canDelete || isSubmitting}
+                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
+                            canDelete
+                              ? 'bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200'
+                              : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                          }`}
+                        >
+                          <span>🗑️</span> 請求を削除
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowEventManageModal(false)}
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm rounded-xl"
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* モーダル: 相殺履歴一覧 */}
       {showOffsetHistoryModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
@@ -1460,7 +1605,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* モーダル: 立替申請（★ 写真UI刷新） */}
+      {/* モーダル: 立替申請 */}
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
@@ -1503,7 +1648,6 @@ export default function Home() {
                 </select>
               </div>
 
-              {/* レシート写真の刷新UI */}
               <div>
                 <label className="text-xs text-slate-600 font-bold block mb-1.5">レシート写真（任意）</label>
                 <input
