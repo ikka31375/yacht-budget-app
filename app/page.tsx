@@ -341,7 +341,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 2. 個人立替申請（画像保存エラーハンドリング強化）
+  // 2. 個人立替申請（画像保存）
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedMemberId) {
@@ -973,7 +973,6 @@ export default function Home() {
                                       alt="レシート"
                                       className="w-full h-full object-cover group-hover:scale-105 transition"
                                       onError={(err) => {
-                                        // 画像ロード失敗時のフォールバック
                                         (err.target as HTMLElement).style.display = 'none';
                                       }}
                                     />
@@ -1076,7 +1075,7 @@ export default function Home() {
               </div>
             )}
 
-            {/* TAB 2: 全体会計（★ 支出・収入のカテゴリ別＆明細を完全装備） */}
+            {/* TAB 2: 全体会計 */}
             {activeTab === 'club' && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -1113,7 +1112,7 @@ export default function Home() {
                   </div>
                 </div>
 
-                {/* 支出 / 収入 表示切り替えタブ */}
+                {/* 支出 / 収入 表示切り替えタブ（※ 金額表示を削除） */}
                 <div className="flex bg-slate-200/80 p-1 rounded-2xl text-sm font-bold max-w-sm mx-auto">
                   <button
                     onClick={() => setClubTxViewMode('expense')}
@@ -1121,7 +1120,7 @@ export default function Home() {
                       clubTxViewMode === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    支出の内訳・明細 (-¥{totalAllExpenses.toLocaleString()})
+                    支出の内訳・明細
                   </button>
                   <button
                     onClick={() => setClubTxViewMode('income')}
@@ -1129,7 +1128,7 @@ export default function Home() {
                       clubTxViewMode === 'income' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
-                    収入の内訳・明細 (+¥{totalAllIncomes.toLocaleString()})
+                    収入の内訳・明細
                   </button>
                 </div>
 
@@ -1256,7 +1255,6 @@ export default function Home() {
                     <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                       <h2 className="font-black text-sm text-slate-600 uppercase">収入明細（入金履歴）</h2>
                       <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                        {/* 1. 部費の納入レコード */}
                         {payments
                           .filter((p) => (p.paid_amount || 0) > 0 && p.payment_method !== '相殺')
                           .map((p) => {
@@ -1282,7 +1280,6 @@ export default function Home() {
                             );
                           })}
 
-                        {/* 2. 直接の寄付金・助成金レコード */}
                         {clubTransactions
                           .filter((t) => t.type === '収入')
                           .map((t) => (
@@ -1968,7 +1965,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* モーダル: 相殺（★ 自動MAX初期値） */}
+      {/* モーダル: 相殺 */}
       {showOffsetModal && selectedExpenseForOffset && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl">
