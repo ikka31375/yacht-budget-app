@@ -4,6 +4,21 @@ import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Member, Payment, Expense, BillingEvent, ClubTransaction, OffsetTransaction } from '@/types';
 
+// 洗練された大分類カテゴリ（固定）
+const EXPENSE_CATEGORIES = [
+  '燃料・交通費',
+  '艇体・艤装・修理費',
+  '活動費（エントリー・遠征・施設）',
+  '消耗品・部室備品',
+  'その他',
+];
+
+const INCOME_CATEGORIES = [
+  'OB・OG寄付金',
+  '大学助成金・支援費',
+  'その他収入',
+];
+
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'personal' | 'club' | 'members'>('personal');
   const [members, setMembers] = useState<Member[]>([]);
@@ -38,18 +53,19 @@ export default function Home() {
   const [eventDueDate, setEventDueDate] = useState('');
   const [targetMemberIds, setTargetMemberIds] = useState<string[]>([]);
 
-  // フォーム: 立替申請
+  // フォーム: 立替申請（画像プレビュー付き）
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
-  const [expenseCategory, setExpenseCategory] = useState('ガソリン代');
+  const [expenseCategory, setExpenseCategory] = useState(EXPENSE_CATEGORIES[0]);
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
+  const [localReceiptPreview, setLocalReceiptPreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // フォーム: 部費出納
   const [txType, setTxType] = useState<'支出' | '収入'>('支出');
   const [txTitle, setTxTitle] = useState('');
   const [txAmount, setTxAmount] = useState('');
-  const [txCategory, setTxCategory] = useState('艇体・セール・艤装費');
+  const [txCategory, setTxCategory] = useState(EXPENSE_CATEGORIES[0]);
   const [txSource, setTxSource] = useState<'部口座振込' | '部室現金'>('部口座振込');
   const [txEventTag, setTxEventTag] = useState('');
 
@@ -150,6 +166,7 @@ export default function Home() {
 
   const totalAllExpenses = Object.values(categorySpendingMap).reduce((a, b) => a + b, 0);
 
+  // 画像圧縮
   const compressImage = (file: File): Promise<Blob> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -174,6 +191,20 @@ export default function Home() {
       };
       img.onerror = (err) => reject(err);
     });
+  };
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setReceiptFile(file);
+      setLocalReceiptPreview(URL.createObjectURL(file));
+    }
+  };
+
+  const clearSelectedFile = () => {
+    setReceiptFile(null);
+    setLocalReceiptPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   // 1. 請求作成
@@ -261,8 +292,7 @@ export default function Home() {
 
     setExpenseTitle('');
     setExpenseAmount('');
-    setReceiptFile(null);
-    if (fileInputRef.current) fileInputRef.current.value = '';
+    clearSelectedFile();
     setShowExpenseModal(false);
     setIsSubmitting(false);
     fetchData();
@@ -291,7 +321,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 4. 現金/振込による請求決済・未納リセット（相殺ログがある場合は警告）
+  // 4. 現金/振込による請求決済・未納リセット
   const executePaymentStatusChange = async () => {
     if (!confirmPaymentTarget) return;
     setIsSubmitting(true);
@@ -310,7 +340,6 @@ export default function Home() {
         })
         .eq('id', confirmPaymentTarget.id);
     } else {
-      // 未納へ戻す
       const linkedOffsets = offsetTransactions.filter((o) => o.payment_id === confirmPaymentTarget.id);
       if (linkedOffsets.length > 0) {
         alert('この請求には相殺履歴があります。「相殺履歴」ボタンから相殺を取り消してください。');
@@ -334,7 +363,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 5. 【相殺ログ方式】相殺の実行
+  // 5. 相殺実行
   const handleExecuteOffset = async () => {
     if (!selectedExpenseForOffset || !targetPaymentIdForOffset) return;
     setIsSubmitting(true);
@@ -359,7 +388,6 @@ export default function Home() {
       return;
     }
 
-    // 1. 相殺トランザクションを記録
     const { error: offsetError } = await supabase.from('offset_transactions').insert({
       member_id: selectedExpenseForOffset.member_id,
       payment_id: targetPayment.id,
@@ -373,7 +401,6 @@ export default function Home() {
       return;
     }
 
-    // 2. 請求レコードを更新
     const nextPaidAmount = currentPaid + offsetAmount;
     const nextPaymentStatus = nextPaidAmount >= targetEvent.amount ? '支払済' : '一部納入';
     await supabase
@@ -385,7 +412,6 @@ export default function Home() {
       })
       .eq('id', targetPayment.id);
 
-    // 3. 立替レコードを更新
     const nextSettledAmount = currentSettled + offsetAmount;
     const nextExpenseStatus = nextSettledAmount >= selectedExpenseForOffset.amount ? '精算済' : '一部精算';
     await supabase
@@ -405,7 +431,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 6. 【相殺ログ方式】相殺ログの取消（完全巻き戻し）
+  // 6. 相殺ログ取消
   const handleCancelOffsetTransaction = async (offsetTx: OffsetTransaction) => {
     if (!confirm(`¥${offsetTx.amount.toLocaleString()} の相殺を取り消しますか？\n（部費と立替の双方が元の残高へ戻ります）`)) {
       return;
@@ -416,7 +442,6 @@ export default function Home() {
     const expense = expenses.find((e) => e.id === offsetTx.expense_id);
     const event = events.find((e) => e.id === payment?.billing_event_id);
 
-    // 1. 請求側の巻き戻し
     if (payment && event) {
       const revertedPaid = Math.max(0, (payment.paid_amount || 0) - offsetTx.amount);
       const nextStatus = revertedPaid === 0 ? '未納' : revertedPaid >= event.amount ? '支払済' : '一部納入';
@@ -430,7 +455,6 @@ export default function Home() {
         .eq('id', payment.id);
     }
 
-    // 2. 立替側の巻き戻し
     if (expense) {
       const revertedSettled = Math.max(0, (expense.settled_amount || 0) - offsetTx.amount);
       const nextStatus = revertedSettled === 0 ? '未精算' : revertedSettled >= expense.amount ? '精算済' : '一部精算';
@@ -443,7 +467,6 @@ export default function Home() {
         .eq('id', expense.id);
     }
 
-    // 3. ログを物理削除
     await supabase.from('offset_transactions').delete().eq('id', offsetTx.id);
 
     alert('相殺を取り消しました');
@@ -476,7 +499,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 9. 立替の直接取消（現金精算した場合のみ）
+  // 9. 立替の直接取消
   const handleRevertExpense = async (expense: Expense) => {
     const linkedOffsets = offsetTransactions.filter((o) => o.expense_id === expense.id);
     if (linkedOffsets.length > 0) {
@@ -567,24 +590,24 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-800 pb-28">
+    <div className="min-h-screen bg-slate-100 text-slate-800 pb-28 text-sm">
       {/* ヘッダー */}
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-3">
         <div className="w-full flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div className="flex justify-between items-center">
-            <h1 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
+            <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
               <span>⛵</span> ヨット部 会計
             </h1>
             <div className="flex gap-2">
               <button
                 onClick={() => setShowOffsetHistoryModal(true)}
-                className="text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-lg font-bold transition"
+                className="text-xs sm:text-sm bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-xl font-bold transition"
               >
                 相殺履歴
               </button>
               <button
                 onClick={exportToCSV}
-                className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700 font-bold transition"
+                className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl text-slate-700 font-bold transition"
               >
                 CSV
               </button>
@@ -592,11 +615,11 @@ export default function Home() {
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 font-medium shrink-0">部員:</span>
+            <span className="text-sm text-slate-600 font-bold shrink-0">部員:</span>
             <select
               value={selectedMemberId}
               onChange={(e) => handleMemberChange(e.target.value)}
-              className="w-full md:w-64 p-2 border border-slate-300 rounded-xl bg-white text-xs font-bold text-slate-800 shadow-sm"
+              className="w-full md:w-64 p-2.5 border border-slate-300 rounded-xl bg-white text-sm font-bold text-slate-800 shadow-sm"
             >
               <option value="">-- 全体 --</option>
               {members.map((m) => (
@@ -612,7 +635,7 @@ export default function Home() {
       {/* メイン */}
       <main className="w-full px-4 py-4 max-w-7xl mx-auto space-y-4">
         {loading ? (
-          <p className="text-xs text-slate-400 text-center py-20 font-medium">読み込み中...</p>
+          <p className="text-sm text-slate-400 text-center py-20 font-medium">読み込み中...</p>
         ) : (
           <>
             {/* TAB 1: マイページ / 個人 */}
@@ -620,21 +643,21 @@ export default function Home() {
               <div className="space-y-4">
                 {currentMember ? (
                   <div className="grid grid-cols-2 gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
-                    <div className="bg-red-50 p-3 rounded-xl border border-red-100">
-                      <span className="text-xs text-red-600 font-bold block">未納部費</span>
-                      <span className="text-lg font-black text-red-700 tabular-nums">
+                    <div className="bg-red-50 p-3.5 rounded-xl border border-red-100">
+                      <span className="text-xs sm:text-sm text-red-600 font-bold block mb-1">未納部費</span>
+                      <span className="text-xl sm:text-2xl font-black text-red-700 tabular-nums">
                         ¥{getUnpaidTotal(currentMember.id).toLocaleString()}
                       </span>
                     </div>
-                    <div className="bg-blue-50 p-3 rounded-xl border border-blue-100">
-                      <span className="text-xs text-blue-600 font-bold block">未精算立替</span>
-                      <span className="text-lg font-black text-blue-700 tabular-nums">
+                    <div className="bg-blue-50 p-3.5 rounded-xl border border-blue-100">
+                      <span className="text-xs sm:text-sm text-blue-600 font-bold block mb-1">未精算立替</span>
+                      <span className="text-xl sm:text-2xl font-black text-blue-700 tabular-nums">
                         ¥{getUnreimbursedTotal(currentMember.id).toLocaleString()}
                       </span>
                     </div>
                   </div>
                 ) : (
-                  <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800 text-center">
+                  <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-800 text-center font-medium">
                     部員を選択すると個人の申請や残高を確認できます
                   </div>
                 )}
@@ -644,16 +667,16 @@ export default function Home() {
                   {currentMember ? (
                     <button
                       onClick={() => setShowExpenseModal(true)}
-                      className="p-3.5 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
+                      className="p-4 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
-                      立替を申請
+                      <span>📸</span> 立替を申請
                     </button>
                   ) : (
                     <button
                       onClick={() => setShowClubTxModal(true)}
-                      className="p-3.5 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
+                      className="p-4 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
-                      部費の出納を記録
+                      <span>💸</span> 部費の出納を記録
                     </button>
                   )}
 
@@ -662,9 +685,9 @@ export default function Home() {
                       setTargetMemberIds(members.map((m) => m.id));
                       setShowEventModal(true);
                     }}
-                    className="p-3.5 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
+                    className="p-4 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                   >
-                    請求を作成
+                    <span>📋</span> 請求を作成
                   </button>
                 </div>
 
@@ -673,25 +696,25 @@ export default function Home() {
                   {/* 請求一覧 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h2 className="font-black text-xs text-slate-500 uppercase">
+                      <h2 className="font-black text-sm text-slate-600 uppercase">
                         {currentMember ? `${currentMember.name}の請求` : '請求状況'}
                       </h2>
-                      <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
+                      <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold">
                         <button
                           onClick={() => setPaymentFilter('unpaid')}
-                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'unpaid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${paymentFilter === 'unpaid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           未納
                         </button>
                         <button
                           onClick={() => setPaymentFilter('paid')}
-                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'paid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${paymentFilter === 'paid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           支払済
                         </button>
                         <button
                           onClick={() => setPaymentFilter('all')}
-                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${paymentFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           すべて
                         </button>
@@ -706,7 +729,7 @@ export default function Home() {
                         return true;
                       })
                       .length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">該当データはありません</p>
+                      <p className="text-sm text-slate-400 text-center py-6">該当データはありません</p>
                     ) : (
                       payments
                         .filter((p) => !currentMember || p.member_id === currentMember.id)
@@ -725,20 +748,20 @@ export default function Home() {
                           return (
                             <div
                               key={p.id}
-                              className="p-3 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center"
+                              className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center"
                             >
-                              <div className="space-y-0.5">
-                                <p className="font-bold text-xs text-slate-800">{ev?.title}</p>
-                                <p className="text-[11px] text-slate-500">
-                                  {member?.name} | ¥{evAmount.toLocaleString()}
+                              <div className="space-y-1">
+                                <p className="font-bold text-sm text-slate-800">{ev?.title}</p>
+                                <p className="text-xs text-slate-500">
+                                  {member?.name} | <span className="font-bold text-slate-700">¥{evAmount.toLocaleString()}</span>
                                 </p>
                                 {p.status === '一部納入' && (
-                                  <p className="text-[10px] text-amber-700 font-bold">
+                                  <p className="text-xs text-amber-700 font-bold">
                                     残: ¥{remainingAmount.toLocaleString()} (納入済: ¥{paidAmount.toLocaleString()})
                                   </p>
                                 )}
                                 {p.payment_method && p.status !== '未納' && (
-                                  <span className="inline-block mt-0.5 text-[9px] bg-white border border-slate-200 text-slate-600 px-1.5 py-0.2 rounded font-medium">
+                                  <span className="inline-block text-[11px] bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded font-medium">
                                     {p.payment_method}
                                   </span>
                                 )}
@@ -746,7 +769,7 @@ export default function Home() {
 
                               <button
                                 onClick={() => setConfirmPaymentTarget(p)}
-                                className={`text-xs px-3 py-1.5 rounded-lg font-bold transition shadow-sm ${
+                                className={`text-xs sm:text-sm px-3.5 py-2 rounded-xl font-bold transition shadow-sm ${
                                   p.status === '支払済'
                                     ? 'bg-green-100 text-green-700 border border-green-300'
                                     : p.status === '一部納入'
@@ -765,25 +788,25 @@ export default function Home() {
                   {/* 立替一覧 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h2 className="font-black text-xs text-slate-500 uppercase">
+                      <h2 className="font-black text-sm text-slate-600 uppercase">
                         {currentMember ? `${currentMember.name}の立替` : '立替一覧'}
                       </h2>
-                      <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
+                      <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold">
                         <button
                           onClick={() => setExpenseFilter('unsettled')}
-                          className={`px-2 py-1 rounded-md transition ${expenseFilter === 'unsettled' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${expenseFilter === 'unsettled' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           未精算
                         </button>
                         <button
                           onClick={() => setExpenseFilter('settled')}
-                          className={`px-2 py-1 rounded-md transition ${expenseFilter === 'settled' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${expenseFilter === 'settled' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           精算済
                         </button>
                         <button
                           onClick={() => setExpenseFilter('all')}
-                          className={`px-2 py-1 rounded-md transition ${expenseFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                          className={`px-2.5 py-1 rounded-md transition ${expenseFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
                         >
                           すべて
                         </button>
@@ -798,7 +821,7 @@ export default function Home() {
                         return true;
                       })
                       .length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">該当データはありません</p>
+                      <p className="text-sm text-slate-400 text-center py-6">該当データはありません</p>
                     ) : (
                       expenses
                         .filter((e) => !currentMember || e.member_id === currentMember.id)
@@ -815,12 +838,12 @@ export default function Home() {
                           const canOffset = memberUnpaid.length > 0 && remainingExpense > 0;
 
                           return (
-                            <div key={e.id} className="p-3 border border-slate-100 rounded-xl bg-slate-50 space-y-2.5">
+                            <div key={e.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 space-y-3">
                               <div className="flex gap-3 items-center">
                                 {e.receipt_url ? (
                                   <div
                                     onClick={() => setPreviewImageUrl(e.receipt_url || null)}
-                                    className="w-14 h-14 rounded-lg bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer"
+                                    className="w-16 h-16 rounded-xl bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer"
                                   >
                                     <img
                                       src={e.receipt_url}
@@ -829,23 +852,24 @@ export default function Home() {
                                     />
                                   </div>
                                 ) : (
-                                  <div className="w-14 h-14 rounded-lg bg-slate-100 shrink-0 border border-slate-200 flex items-center justify-center text-slate-400 text-xs">
-                                    無
+                                  <div className="w-16 h-16 rounded-xl bg-slate-100 shrink-0 border border-slate-200 flex flex-col items-center justify-center text-slate-400 text-xs font-bold">
+                                    <span>📄</span>
+                                    <span>写真無</span>
                                   </div>
                                 )}
 
                                 <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                    <span className="text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md font-bold">
                                       {e.category}
                                     </span>
-                                    <span className="text-[11px] text-slate-500">{member?.name}</span>
+                                    <span className="text-xs text-slate-500 font-medium">{member?.name}</span>
                                   </div>
-                                  <p className="font-bold text-xs text-slate-800 truncate mt-0.5">{e.title}</p>
-                                  <p className="text-sm font-black text-slate-900 tabular-nums">
+                                  <p className="font-bold text-sm text-slate-900 truncate mt-1">{e.title}</p>
+                                  <p className="text-base font-black text-slate-900 tabular-nums">
                                     ¥{e.amount.toLocaleString()}
                                     {e.status === '一部精算' && (
-                                      <span className="text-xs text-amber-700 font-bold ml-1.5">
+                                      <span className="text-xs text-amber-700 font-bold ml-2">
                                         (残 ¥{remainingExpense.toLocaleString()})
                                       </span>
                                     )}
@@ -854,7 +878,7 @@ export default function Home() {
 
                                 <div className="shrink-0 text-right">
                                   <span
-                                    className={`text-[10px] px-2 py-1 rounded-md font-black ${
+                                    className={`text-xs px-2.5 py-1 rounded-lg font-black ${
                                       e.status === '精算済'
                                         ? 'bg-slate-200 text-slate-600'
                                         : e.status === '一部精算'
@@ -868,13 +892,13 @@ export default function Home() {
                               </div>
 
                               {e.reject_reason && (
-                                <div className="p-2 rounded-lg text-[10px] font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
+                                <div className="p-2.5 rounded-lg text-xs font-medium bg-emerald-50 text-emerald-800 border border-emerald-200">
                                   {e.reject_reason}
                                 </div>
                               )}
 
                               {e.status !== '精算済' && (
-                                <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-200">
+                                <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200">
                                   <button
                                     onClick={() => {
                                       if (!canOffset) return;
@@ -884,9 +908,9 @@ export default function Home() {
                                       setShowOffsetModal(true);
                                     }}
                                     disabled={!canOffset}
-                                    className={`py-1.5 text-[11px] font-bold rounded-lg transition ${
+                                    className={`py-2 text-xs font-bold rounded-xl transition ${
                                       canOffset
-                                        ? 'bg-amber-500 hover:bg-amber-600 text-white'
+                                        ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm'
                                         : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                                     }`}
                                   >
@@ -895,14 +919,14 @@ export default function Home() {
 
                                   <button
                                     onClick={() => handleCashSettle(e)}
-                                    className="py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold rounded-lg transition"
+                                    className="py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-xl transition shadow-sm"
                                   >
                                     現金精算
                                   </button>
 
                                   <button
                                     onClick={() => handleDeleteExpense(e)}
-                                    className="py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-[11px] font-bold rounded-lg transition"
+                                    className="py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-xl transition"
                                   >
                                     削除
                                   </button>
@@ -913,7 +937,7 @@ export default function Home() {
                                 <div className="flex justify-end pt-1">
                                   <button
                                     onClick={() => handleRevertExpense(e)}
-                                    className="text-[10px] text-slate-400 hover:text-slate-600 font-medium underline"
+                                    className="text-xs text-slate-400 hover:text-slate-600 font-medium underline"
                                   >
                                     未精算に戻す
                                   </button>
@@ -932,33 +956,33 @@ export default function Home() {
             {activeTab === 'club' && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="md:col-span-2 bg-slate-900 text-white p-5 rounded-3xl shadow-lg space-y-3">
-                    <span className="text-xs text-slate-400">部の手元資金（部口座＋現金）</span>
-                    <div className="text-3xl sm:text-4xl font-black tabular-nums">
+                  <div className="md:col-span-2 bg-slate-900 text-white p-6 rounded-3xl shadow-lg space-y-4">
+                    <span className="text-sm text-slate-400 font-medium">部の手元資金（部口座＋部室現金）</span>
+                    <div className="text-3xl sm:text-4xl font-black tabular-nums tracking-tight">
                       ¥{estimatedClubTreasury.toLocaleString()}
                     </div>
-                    <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-800 text-xs">
+                    <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800 text-sm">
                       <div>
-                        <span className="text-slate-400 text-[10px] block">現金の総入金（部費+寄付）</span>
-                        <span className="font-bold text-emerald-400 tabular-nums">
+                        <span className="text-slate-400 text-xs block">現金の総入金（部費+寄付）</span>
+                        <span className="font-bold text-emerald-400 tabular-nums text-base">
                           +¥{(totalCollectedDues + totalClubDonations).toLocaleString()}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-400 text-[10px] block">現金の総出金（部支出+精算）</span>
-                        <span className="font-bold text-rose-400 tabular-nums">
+                        <span className="text-slate-400 text-xs block">現金の総出金（部支出+精算）</span>
+                        <span className="font-bold text-rose-400 tabular-nums text-base">
                           -¥{(totalDirectClubExpenses + totalReimbursedExpenses).toLocaleString()}
                         </span>
                       </div>
                     </div>
                   </div>
 
-                  <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-center">
-                    <p className="text-xs text-slate-500 font-medium">部費出納</p>
-                    <p className="text-[11px] text-slate-400 mt-1 mb-3">エントリー費・係留料・寄付など</p>
+                  <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-center">
+                    <p className="text-sm text-slate-700 font-bold">部費出納</p>
+                    <p className="text-xs text-slate-400 mt-1 mb-4">エントリー費・係留料・寄付など</p>
                     <button
                       onClick={() => setShowClubTxModal(true)}
-                      className="w-full p-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs transition"
+                      className="w-full p-3.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-sm transition shadow-sm"
                     >
                       出納を記録
                     </button>
@@ -966,29 +990,29 @@ export default function Home() {
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+                  <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
                     <div className="flex justify-between items-center">
-                      <h2 className="font-black text-xs text-slate-500 uppercase">支出カテゴリ別</h2>
-                      <span className="text-xs font-bold text-slate-700 tabular-nums">
+                      <h2 className="font-black text-sm text-slate-600 uppercase">支出カテゴリ別</h2>
+                      <span className="text-sm font-bold text-slate-800 tabular-nums">
                         計: ¥{totalAllExpenses.toLocaleString()}
                       </span>
                     </div>
                     {totalAllExpenses === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">データはありません</p>
+                      <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
                     ) : (
                       <div className="space-y-3">
                         {Object.entries(categorySpendingMap).map(([cat, amt]) => {
                           const percent = Math.round((amt / totalAllExpenses) * 100);
                           return (
                             <div key={cat} className="space-y-1">
-                              <div className="flex justify-between text-xs font-semibold">
+                              <div className="flex justify-between text-xs sm:text-sm font-semibold">
                                 <span className="text-slate-700">{cat}</span>
                                 <span className="text-slate-900 tabular-nums">
                                   ¥{amt.toLocaleString()} ({percent}%)
                                 </span>
                               </div>
-                              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                                <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${percent}%` }}></div>
+                              <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
+                                <div className="bg-blue-600 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
                               </div>
                             </div>
                           );
@@ -997,25 +1021,25 @@ export default function Home() {
                     )}
                   </section>
 
-                  <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <h2 className="font-black text-xs text-slate-500 uppercase">支出明細</h2>
+                  <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+                    <h2 className="font-black text-sm text-slate-600 uppercase">支出明細</h2>
                     <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                       {clubTransactions
                         .filter((t) => t.type === '支出')
                         .map((t) => (
-                          <div key={t.id} className="p-3 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                          <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
                             <div>
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md font-bold">
                                   部費出納
                                 </span>
-                                <span className="text-xs font-bold text-slate-800">{t.title}</span>
+                                <span className="text-sm font-bold text-slate-800">{t.title}</span>
                               </div>
-                              <p className="text-[10px] text-slate-500 mt-1">
+                              <p className="text-xs text-slate-500 mt-1">
                                 {t.category} | {t.payment_source}
                               </p>
                             </div>
-                            <span className="text-xs font-black tabular-nums text-slate-800">
+                            <span className="text-sm font-black tabular-nums text-slate-800">
                               -¥{t.amount.toLocaleString()}
                             </span>
                           </div>
@@ -1026,19 +1050,19 @@ export default function Home() {
                         .map((e) => {
                           const mem = members.find((m) => m.id === e.member_id);
                           return (
-                            <div key={e.id} className="p-3 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
+                            <div key={e.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
                               <div>
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-[9px] bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded font-bold">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md font-bold">
                                     立替充当・精算
                                   </span>
-                                  <span className="text-xs font-bold text-slate-800">{e.title}</span>
+                                  <span className="text-sm font-bold text-slate-800">{e.title}</span>
                                 </div>
-                                <p className="text-[10px] text-slate-500 mt-1">
+                                <p className="text-xs text-slate-500 mt-1">
                                   {e.category} | {mem?.name}
                                 </p>
                               </div>
-                              <span className="text-xs font-black tabular-nums text-slate-800">
+                              <span className="text-sm font-black tabular-nums text-slate-800">
                                 -¥{(e.settled_amount || 0).toLocaleString()}
                               </span>
                             </div>
@@ -1053,7 +1077,7 @@ export default function Home() {
             {/* TAB 3: 部員一覧 */}
             {activeTab === 'members' && (
               <div className="space-y-3">
-                <p className="text-xs text-slate-500">部員を選択すると個別の履歴を確認できます</p>
+                <p className="text-sm text-slate-500">部員を選択すると個別の履歴を確認できます</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {members.map((m) => {
                     const unpaid = getUnpaidTotal(m.id);
@@ -1068,35 +1092,35 @@ export default function Home() {
                       >
                         <div className="flex justify-between items-start">
                           <div>
-                            <span className="font-bold text-sm text-slate-900">
+                            <span className="font-bold text-base text-slate-900">
                               {m.grade}年 {m.name}
                             </span>
-                            <span className="ml-2 text-[10px] bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded font-medium">
+                            <span className="ml-2 text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-medium">
                               {m.role}
                             </span>
                           </div>
                           {canOffset && (
-                            <span className="text-[9px] bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full font-black border border-amber-200">
+                            <span className="text-[11px] bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full font-black border border-amber-200">
                               相殺可
                             </span>
                           )}
                         </div>
 
                         <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100 text-center">
-                          <div className="bg-slate-50 p-2 rounded-xl">
-                            <span className="text-[10px] text-slate-400 block font-medium">未納部費</span>
+                          <div className="bg-slate-50 p-2.5 rounded-xl">
+                            <span className="text-xs text-slate-400 block font-medium">未納部費</span>
                             <span
-                              className={`text-xs font-bold tabular-nums ${
+                              className={`text-sm sm:text-base font-bold tabular-nums ${
                                 unpaid > 0 ? 'text-red-600' : 'text-slate-400'
                               }`}
                             >
                               ¥{unpaid.toLocaleString()}
                             </span>
                           </div>
-                          <div className="bg-slate-50 p-2 rounded-xl">
-                            <span className="text-[10px] text-slate-400 block font-medium">未精算立替</span>
+                          <div className="bg-slate-50 p-2.5 rounded-xl">
+                            <span className="text-xs text-slate-400 block font-medium">未精算立替</span>
                             <span
-                              className={`text-xs font-bold tabular-nums ${
+                              className={`text-sm sm:text-base font-bold tabular-nums ${
                                 unreimbursed > 0 ? 'text-blue-600' : 'text-slate-400'
                               }`}
                             >
@@ -1123,8 +1147,8 @@ export default function Home() {
               activeTab === 'personal' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
-            <span className="text-xl">👤</span>
-            <span className="text-[11px]">マイページ</span>
+            <span className="text-2xl">👤</span>
+            <span className="text-xs">マイページ</span>
           </button>
           <button
             onClick={() => setActiveTab('club')}
@@ -1132,8 +1156,8 @@ export default function Home() {
               activeTab === 'club' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
-            <span className="text-xl">📊</span>
-            <span className="text-[11px]">全体会計</span>
+            <span className="text-2xl">📊</span>
+            <span className="text-xs">全体会計</span>
           </button>
           <button
             onClick={() => setActiveTab('members')}
@@ -1141,13 +1165,13 @@ export default function Home() {
               activeTab === 'members' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
-            <span className="text-xl">👥</span>
-            <span className="text-[11px]">部員一覧</span>
+            <span className="text-2xl">👥</span>
+            <span className="text-xs">部員一覧</span>
           </button>
         </div>
       </nav>
 
-      {/* モーダル: 相殺履歴一覧（完全な取消が可能） */}
+      {/* モーダル: 相殺履歴一覧 */}
       {showOffsetHistoryModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
@@ -1159,7 +1183,7 @@ export default function Home() {
             </div>
 
             {offsetTransactions.length === 0 ? (
-              <p className="text-xs text-slate-400 text-center py-6">相殺履歴はありません</p>
+              <p className="text-sm text-slate-400 text-center py-6">相殺履歴はありません</p>
             ) : (
               <div className="space-y-2">
                 {offsetTransactions
@@ -1171,16 +1195,16 @@ export default function Home() {
                     const expense = expenses.find((e) => e.id === o.expense_id);
 
                     return (
-                      <div key={o.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs flex justify-between items-center">
-                        <div className="space-y-0.5">
+                      <div key={o.id} className="p-3.5 bg-slate-50 border border-slate-200 rounded-xl text-sm flex justify-between items-center">
+                        <div className="space-y-1">
                           <p className="font-bold text-slate-800">{member?.name} | ¥{o.amount.toLocaleString()}</p>
-                          <p className="text-[10px] text-slate-500">部費: {event?.title}</p>
-                          <p className="text-[10px] text-slate-500">立替: {expense?.title}</p>
+                          <p className="text-xs text-slate-500">部費: {event?.title}</p>
+                          <p className="text-xs text-slate-500">立替: {expense?.title}</p>
                         </div>
                         <button
                           onClick={() => handleCancelOffsetTransaction(o)}
                           disabled={isSubmitting}
-                          className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-lg transition"
+                          className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-lg transition"
                         >
                           取消
                         </button>
@@ -1192,7 +1216,7 @@ export default function Home() {
 
             <button
               onClick={() => setShowOffsetHistoryModal(false)}
-              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl"
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm rounded-xl"
             >
               閉じる
             </button>
@@ -1215,7 +1239,7 @@ export default function Home() {
 
               return (
                 <div className="space-y-3">
-                  <div className="p-3 bg-slate-50 rounded-xl text-xs space-y-1">
+                  <div className="p-3.5 bg-slate-50 rounded-xl text-sm space-y-1">
                     <p className="font-bold text-slate-800">{ev?.title}</p>
                     <p className="text-slate-600">対象: {mem?.name}</p>
                     <p className="text-slate-600 font-bold">請求額: ¥{totalAmount.toLocaleString()}</p>
@@ -1226,12 +1250,12 @@ export default function Home() {
 
                   {isClearing && (
                     <div>
-                      <label className="text-xs text-slate-600 font-medium">納入方法</label>
-                      <div className="grid grid-cols-2 gap-2 mt-1">
+                      <label className="text-xs text-slate-600 font-bold block mb-1">納入方法</label>
+                      <div className="grid grid-cols-2 gap-2">
                         <button
                           type="button"
                           onClick={() => setConfirmPaymentMethod('振込')}
-                          className={`py-1.5 text-xs font-bold rounded-lg border ${
+                          className={`py-2 text-xs font-bold rounded-xl border ${
                             confirmPaymentMethod === '振込'
                               ? 'bg-blue-600 text-white border-blue-600'
                               : 'bg-white text-slate-700 border-slate-200'
@@ -1242,13 +1266,13 @@ export default function Home() {
                         <button
                           type="button"
                           onClick={() => setConfirmPaymentMethod('現金')}
-                          className={`py-1.5 text-xs font-bold rounded-lg border ${
+                          className={`py-2 text-xs font-bold rounded-xl border ${
                             confirmPaymentMethod === '現金'
                               ? 'bg-blue-600 text-white border-blue-600'
                               : 'bg-white text-slate-700 border-slate-200'
                           }`}
                         >
-                          現金
+                          現金手渡し
                         </button>
                       </div>
                     </div>
@@ -1258,7 +1282,7 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={() => setConfirmPaymentTarget(null)}
-                      className="flex-1 py-2 text-xs border border-slate-200 rounded-xl"
+                      className="flex-1 py-2.5 text-xs font-bold border border-slate-200 rounded-xl"
                     >
                       戻る
                     </button>
@@ -1266,7 +1290,7 @@ export default function Home() {
                       type="button"
                       onClick={executePaymentStatusChange}
                       disabled={isSubmitting}
-                      className="flex-1 py-2 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md"
+                      className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md"
                     >
                       {isClearing ? '支払済にする' : '未納に戻す'}
                     </button>
@@ -1278,13 +1302,13 @@ export default function Home() {
         </div>
       )}
 
-      {/* モーダル: レシート画像 */}
+      {/* モーダル: レシート拡大画像 */}
       {previewImageUrl && (
         <div
           onClick={() => setPreviewImageUrl(null)}
-          className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50 cursor-pointer"
+          className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50 cursor-pointer"
         >
-          <img src={previewImageUrl} alt="レシート" className="max-h-[80vh] w-auto rounded-xl object-contain" />
+          <img src={previewImageUrl} alt="レシート" className="max-h-[85vh] w-auto rounded-2xl object-contain shadow-2xl" />
         </div>
       )}
 
@@ -1293,28 +1317,28 @@ export default function Home() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
             <div className="flex justify-between items-start border-b pb-3">
-              <h3 className="font-black text-base text-slate-800">
+              <h3 className="font-black text-lg text-slate-800">
                 {selectedMemberDetail.grade}年 {selectedMemberDetail.name} ({selectedMemberDetail.role})
               </h3>
-              <button onClick={() => setSelectedMemberDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold text-lg">
+              <button onClick={() => setSelectedMemberDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold text-xl">
                 ✕
               </button>
             </div>
 
             <div className="space-y-3">
-              <h4 className="text-xs font-bold text-slate-600">納入履歴</h4>
+              <h4 className="text-sm font-bold text-slate-700">納入履歴</h4>
               {payments.filter((p) => p.member_id === selectedMemberDetail.id).length === 0 ? (
-                <p className="text-[11px] text-slate-400">データはありません</p>
+                <p className="text-xs text-slate-400">データはありません</p>
               ) : (
                 payments
                   .filter((p) => p.member_id === selectedMemberDetail.id)
                   .map((p) => {
                     const ev = events.find((e) => e.id === p.billing_event_id);
                     return (
-                      <div key={p.id} className="p-2.5 bg-slate-50 rounded-xl text-xs flex justify-between items-center">
+                      <div key={p.id} className="p-3 bg-slate-50 rounded-xl text-xs flex justify-between items-center">
                         <div>
-                          <p className="font-semibold text-slate-800">{ev?.title}</p>
-                          <p className="text-[10px] text-slate-500">
+                          <p className="font-bold text-slate-800">{ev?.title}</p>
+                          <p className="text-[11px] text-slate-500">
                             {ev?.due_date} | {p.payment_method}
                           </p>
                         </div>
@@ -1326,19 +1350,19 @@ export default function Home() {
                   })
               )}
 
-              <h4 className="text-xs font-bold text-slate-600 pt-2">立替履歴</h4>
+              <h4 className="text-sm font-bold text-slate-700 pt-2">立替履歴</h4>
               {expenses.filter((e) => e.member_id === selectedMemberDetail.id).length === 0 ? (
-                <p className="text-[11px] text-slate-400">データはありません</p>
+                <p className="text-xs text-slate-400">データはありません</p>
               ) : (
                 expenses
                   .filter((e) => e.member_id === selectedMemberDetail.id)
                   .map((e) => (
-                    <div key={e.id} className="p-2.5 bg-slate-50 rounded-xl text-xs flex justify-between items-center">
+                    <div key={e.id} className="p-3 bg-slate-50 rounded-xl text-xs flex justify-between items-center">
                       <div>
-                        <p className="font-semibold text-slate-800">
+                        <p className="font-bold text-slate-800">
                           {e.title} (¥{e.amount.toLocaleString()})
                         </p>
-                        <p className="text-[10px] text-slate-500">{e.category}</p>
+                        <p className="text-[11px] text-slate-500">{e.category}</p>
                       </div>
                       <span className="font-bold text-slate-600">{e.status}</span>
                     </div>
@@ -1348,7 +1372,7 @@ export default function Home() {
 
             <button
               onClick={() => setSelectedMemberDetail(null)}
-              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl"
+              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm rounded-xl"
             >
               閉じる
             </button>
@@ -1360,56 +1384,56 @@ export default function Home() {
       {showEventModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">新規請求の作成</h3>
-            <form onSubmit={handleCreateBillingEvent} className="space-y-3">
+            <h3 className="font-black text-lg text-slate-800">新規請求の作成</h3>
+            <form onSubmit={handleCreateBillingEvent} className="space-y-3.5">
               <div>
-                <label className="text-xs text-slate-600 font-medium">請求タイトル</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">請求タイトル</label>
                 <input
                   type="text"
-                  placeholder="例: 10月度部費"
+                  placeholder="例: 10月度部費、合宿費"
                   required
                   value={eventTitle}
                   onChange={(e) => setEventTitle(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-600 font-medium">金額 (1人あたり)</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">金額 (1人あたり)</label>
                 <input
                   type="number"
                   placeholder="5000"
                   required
                   value={eventAmount}
                   onChange={(e) => setEventAmount(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-600 font-medium">支払期日</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">支払期日</label>
                 <input
                   type="date"
                   value={eventDueDate}
                   onChange={(e) => setEventDueDate(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
               <div>
-                <div className="flex justify-between items-center mb-1">
-                  <label className="text-xs text-slate-600 font-medium">対象部員 ({targetMemberIds.length}名)</label>
+                <div className="flex justify-between items-center mb-1.5">
+                  <label className="text-xs text-slate-600 font-bold">対象部員 ({targetMemberIds.length}名)</label>
                   <button
                     type="button"
                     onClick={() => {
                       if (targetMemberIds.length === members.length) setTargetMemberIds([]);
                       else setTargetMemberIds(members.map((m) => m.id));
                     }}
-                    className="text-[10px] text-blue-600 underline font-bold"
+                    className="text-xs text-blue-600 underline font-bold"
                   >
                     全選択/解除
                   </button>
                 </div>
                 <div className="max-h-32 overflow-y-auto border border-slate-100 rounded-xl p-2 space-y-1 bg-slate-50">
                   {members.map((m) => (
-                    <label key={m.id} className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer p-0.5">
+                    <label key={m.id} className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer p-1">
                       <input
                         type="checkbox"
                         checked={targetMemberIds.includes(m.id)}
@@ -1424,10 +1448,10 @@ export default function Home() {
                 </div>
               </div>
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => setShowEventModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
+                <button type="button" onClick={() => setShowEventModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
+                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
                   作成
                 </button>
               </div>
@@ -1436,64 +1460,97 @@ export default function Home() {
         </div>
       )}
 
-      {/* モーダル: 立替申請 */}
+      {/* モーダル: 立替申請（★ 写真UI刷新） */}
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">立替金の申請</h3>
-            <form onSubmit={handleCreateExpense} className="space-y-3">
+            <h3 className="font-black text-lg text-slate-800">立替金の申請</h3>
+            <form onSubmit={handleCreateExpense} className="space-y-3.5">
               <div>
-                <label className="text-xs text-slate-600 font-medium">用途・品名</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">用途・品名</label>
                 <input
                   type="text"
-                  placeholder="例: ガソリン代"
+                  placeholder="例: レスキュー艇給油代"
                   required
                   value={expenseTitle}
                   onChange={(e) => setExpenseTitle(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-600 font-medium">金額</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">金額</label>
                 <input
                   type="number"
                   placeholder="3000"
                   required
                   value={expenseAmount}
                   onChange={(e) => setExpenseAmount(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
               <div>
-                <label className="text-xs text-slate-600 font-medium">カテゴリ</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">カテゴリ</label>
                 <select
                   value={expenseCategory}
                   onChange={(e) => setExpenseCategory(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm font-semibold"
                 >
-                  <option value="ガソリン代">ガソリン代</option>
-                  <option value="艇体・修繕費">艇体・修繕費</option>
-                  <option value="消耗品">消耗品</option>
-                  <option value="合宿・遠征費">合宿・遠征費</option>
-                  <option value="その他">その他</option>
+                  {EXPENSE_CATEGORIES.map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
               </div>
+
+              {/* レシート写真の刷新UI */}
               <div>
-                <label className="text-xs text-slate-600 font-medium">レシート写真</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1.5">レシート写真（任意）</label>
                 <input
                   type="file"
                   accept="image/*"
                   ref={fileInputRef}
-                  onChange={(e) => setReceiptFile(e.target.files?.[0] || null)}
-                  className="w-full mt-1 text-xs text-slate-500"
+                  onChange={handleFileSelect}
+                  className="hidden"
                 />
+
+                {localReceiptPreview ? (
+                  <div className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-50 p-2 flex items-center gap-3">
+                    <img
+                      src={localReceiptPreview}
+                      alt="プレビュー"
+                      className="w-16 h-16 object-cover rounded-xl border border-slate-200 shrink-0"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-bold text-slate-800 truncate">{receiptFile?.name}</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">添付完了</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={clearSelectedFile}
+                      className="w-8 h-8 rounded-full bg-slate-200 hover:bg-rose-100 hover:text-rose-600 text-slate-600 flex items-center justify-center font-bold text-sm transition shrink-0"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/50 rounded-2xl p-4 text-center cursor-pointer transition space-y-1 bg-slate-50/50"
+                  >
+                    <span className="text-2xl block">📸</span>
+                    <p className="text-xs font-bold text-slate-700">タップして撮影 / 写真を選択</p>
+                    <p className="text-[11px] text-slate-400">自動でファイルサイズを最適化します</p>
+                  </div>
+                )}
               </div>
+
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => setShowExpenseModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
+                <button type="button" onClick={() => setShowExpenseModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-blue-600 text-white font-bold rounded-xl shadow-md">
-                  申請
+                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-blue-600 text-white font-bold rounded-xl shadow-md">
+                  申請する
                 </button>
               </div>
             </form>
@@ -1505,104 +1562,100 @@ export default function Home() {
       {showClubTxModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">部費出納の記録</h3>
-            <form onSubmit={handleCreateClubTransaction} className="space-y-3">
+            <h3 className="font-black text-lg text-slate-800">部費出納の記録</h3>
+            <form onSubmit={handleCreateClubTransaction} className="space-y-3.5">
               <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl text-xs font-bold">
                 <button
                   type="button"
-                  onClick={() => setTxType('支出')}
-                  className={`py-1.5 rounded-lg ${txType === '支出' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600'}`}
+                  onClick={() => {
+                    setTxType('支出');
+                    setTxCategory(EXPENSE_CATEGORIES[0]);
+                  }}
+                  className={`py-2 rounded-lg ${txType === '支出' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600'}`}
                 >
                   支出
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTxType('収入')}
-                  className={`py-1.5 rounded-lg ${txType === '収入' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600'}`}
+                  onClick={() => {
+                    setTxType('収入');
+                    setTxCategory(INCOME_CATEGORIES[0]);
+                  }}
+                  className={`py-2 rounded-lg ${txType === '収入' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600'}`}
                 >
                   収入
                 </button>
               </div>
 
               <div>
-                <label className="text-xs text-slate-600 font-medium">品名・内容</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">品名・内容</label>
                 <input
                   type="text"
-                  placeholder="例: インカレ参加料"
+                  placeholder={txType === '支出' ? '例: インカレ参加料' : '例: OB〇〇先輩からの寄付'}
                   required
                   value={txTitle}
                   onChange={(e) => setTxTitle(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
 
               <div>
-                <label className="text-xs text-slate-600 font-medium">金額</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">金額</label>
                 <input
                   type="number"
                   placeholder="50000"
                   required
                   value={txAmount}
                   onChange={(e) => setTxAmount(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm"
                 />
               </div>
 
               <div>
-                <label className="text-xs text-slate-600 font-medium">カテゴリ</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1">カテゴリ</label>
                 <select
                   value={txCategory}
                   onChange={(e) => setTxCategory(e.target.value)}
-                  className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                  className="w-full p-3 border border-slate-200 rounded-xl text-sm font-semibold"
                 >
-                  {txType === '支出' ? (
-                    <>
-                      <option value="エントリー費・学連登録">エントリー費・学連登録</option>
-                      <option value="艇体・セール・艤装費">艇体・セール・艤装費</option>
-                      <option value="ハーバー係留・スロープ料">ハーバー係留・スロープ料</option>
-                      <option value="合宿所・施設利用料">合宿所・施設利用料</option>
-                      <option value="その他">その他</option>
-                    </>
-                  ) : (
-                    <>
-                      <option value="OB寄付金">OB寄付金</option>
-                      <option value="大学助成金">大学助成金</option>
-                      <option value="その他">その他</option>
-                    </>
-                  )}
+                  {(txType === '支出' ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map((cat) => (
+                    <option key={cat} value={cat}>
+                      {cat}
+                    </option>
+                  ))}
                 </select>
               </div>
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs text-slate-600 font-medium">出納元</label>
+                  <label className="text-xs text-slate-600 font-bold block mb-1">出納元</label>
                   <select
                     value={txSource}
                     onChange={(e) => setTxSource(e.target.value as any)}
-                    className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
                   >
                     <option value="部口座振込">部口座振込</option>
                     <option value="部室現金">部室現金</option>
                   </select>
                 </div>
                 <div>
-                  <label className="text-xs text-slate-600 font-medium">タグ (任意)</label>
+                  <label className="text-xs text-slate-600 font-bold block mb-1">タグ (任意)</label>
                   <input
                     type="text"
                     placeholder="例: 秋インカレ"
                     value={txEventTag}
                     onChange={(e) => setTxEventTag(e.target.value)}
-                    className="w-full mt-1 p-2.5 border border-slate-200 rounded-xl text-xs"
+                    className="w-full p-2.5 border border-slate-200 rounded-xl text-xs"
                   />
                 </div>
               </div>
 
               <div className="flex gap-2 pt-2">
-                <button type="button" onClick={() => setShowClubTxModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
+                <button type="button" onClick={() => setShowClubTxModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
-                  登録
+                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
+                  登録する
                 </button>
               </div>
             </form>
@@ -1614,20 +1667,20 @@ export default function Home() {
       {showOffsetModal && selectedExpenseForOffset && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">立替金を部費へ相殺</h3>
-            <div className="bg-amber-50 p-3 rounded-xl text-xs text-amber-900 border border-amber-200 space-y-0.5">
+            <h3 className="font-black text-lg text-slate-800">立替金を部費へ相殺</h3>
+            <div className="bg-amber-50 p-3.5 rounded-xl text-xs text-amber-900 border border-amber-200 space-y-1">
               <p>立替: <span className="font-bold">{selectedExpenseForOffset.title}</span></p>
-              <p className="font-bold">
+              <p className="font-black text-sm">
                 充当可能額: ¥{(selectedExpenseForOffset.amount - (selectedExpenseForOffset.settled_amount || 0)).toLocaleString()}
               </p>
             </div>
 
             <div>
-              <label className="text-xs text-slate-600 font-medium">充当先の未納請求</label>
+              <label className="text-xs text-slate-600 font-bold block mb-1">充当先の未納請求</label>
               <select
                 value={targetPaymentIdForOffset}
                 onChange={(e) => setTargetPaymentIdForOffset(e.target.value)}
-                className="w-full mt-1 p-2 border border-slate-200 rounded-xl text-xs font-semibold"
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
               >
                 {payments
                   .filter((p) => p.member_id === selectedExpenseForOffset.member_id && p.status !== '支払済')
@@ -1644,25 +1697,25 @@ export default function Home() {
             </div>
 
             <div>
-              <label className="text-xs text-slate-600 font-medium">相殺金額 (未入力で最大額)</label>
+              <label className="text-xs text-slate-600 font-bold block mb-1">相殺金額 (未入力で最大額)</label>
               <input
                 type="number"
                 placeholder="例: 3000"
                 value={offsetCustomAmount}
                 onChange={(e) => setOffsetCustomAmount(e.target.value)}
-                className="w-full mt-1 p-2 border border-slate-200 rounded-xl text-xs font-semibold"
+                className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
               />
             </div>
 
             <div className="flex gap-2 pt-2">
-              <button type="button" onClick={() => setShowOffsetModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
+              <button type="button" onClick={() => setShowOffsetModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                 戻る
               </button>
               <button
                 type="button"
                 onClick={handleExecuteOffset}
                 disabled={isSubmitting}
-                className="flex-1 py-2.5 text-xs bg-amber-500 text-white font-bold rounded-xl shadow-md"
+                className="flex-1 py-3 text-xs bg-amber-500 text-white font-bold rounded-xl shadow-md"
               >
                 相殺を実行
               </button>
