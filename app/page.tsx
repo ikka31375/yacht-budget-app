@@ -14,10 +14,11 @@ export default function Home() {
   const [clubTransactions, setClubTransactions] = useState<ClubTransaction[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
-  // フィルタ状態
-  const [expenseFilter, setExpenseFilter] = useState<'all' | 'unsettled' | 'settled'>('unsettled');
+  // フィルター
+  const [paymentFilter, setPaymentFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
+  const [expenseFilter, setExpenseFilter] = useState<'unsettled' | 'settled' | 'all'>('unsettled');
 
-  // モーダル管理
+  // モーダル
   const [showEventModal, setShowEventModal] = useState(false);
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showClubTxModal, setShowClubTxModal] = useState(false);
@@ -25,24 +26,24 @@ export default function Home() {
   const [selectedMemberDetail, setSelectedMemberDetail] = useState<Member | null>(null);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
-  // 納入確認モーダル
+  // 納入ステータス変更
   const [confirmPaymentTarget, setConfirmPaymentTarget] = useState<Payment | null>(null);
   const [confirmPaymentMethod, setConfirmPaymentMethod] = useState<'現金' | '振込'>('振込');
 
-  // フォームState: 請求作成
+  // フォーム: 請求作成
   const [eventTitle, setEventTitle] = useState('');
   const [eventAmount, setEventAmount] = useState('');
   const [eventDueDate, setEventDueDate] = useState('');
   const [targetMemberIds, setTargetMemberIds] = useState<string[]>([]);
 
-  // フォームState: 立替申請
+  // フォーム: 立替申請
   const [expenseTitle, setExpenseTitle] = useState('');
   const [expenseAmount, setExpenseAmount] = useState('');
   const [expenseCategory, setExpenseCategory] = useState('ガソリン代');
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // フォームState: 部費出納
+  // フォーム: 部費出納
   const [txType, setTxType] = useState<'支出' | '収入'>('支出');
   const [txTitle, setTxTitle] = useState('');
   const [txAmount, setTxAmount] = useState('');
@@ -50,7 +51,7 @@ export default function Home() {
   const [txSource, setTxSource] = useState<'部口座振込' | '部室現金'>('部口座振込');
   const [txEventTag, setTxEventTag] = useState('');
 
-  // フォームState: 相殺
+  // フォーム: 相殺
   const [selectedExpenseForOffset, setSelectedExpenseForOffset] = useState<Expense | null>(null);
   const [targetPaymentIdForOffset, setTargetPaymentIdForOffset] = useState<string>('');
 
@@ -88,7 +89,7 @@ export default function Home() {
 
   const currentMember = members.find((m) => m.id === selectedMemberId);
 
-  // 金額計算（一部納入対応）
+  // 金額計算
   const getUnpaidTotal = (memberId: string) => {
     return payments
       .filter((p) => p.member_id === memberId && p.status !== '支払済')
@@ -106,7 +107,6 @@ export default function Home() {
       .reduce((sum, e) => sum + e.amount, 0);
   };
 
-  // 部全体の金庫・収支計算
   const totalCollectedDues = payments
     .filter((p) => p.payment_method !== '相殺')
     .reduce((sum, p) => sum + (p.paid_amount || 0), 0);
@@ -126,7 +126,6 @@ export default function Home() {
   const estimatedClubTreasury =
     totalCollectedDues + totalClubDonations - totalDirectClubExpenses - totalReimbursedExpenses;
 
-  // カテゴリ別集計
   const categorySpendingMap: { [cat: string]: number } = {};
   clubTransactions
     .filter((t) => t.type === '支出')
@@ -161,7 +160,7 @@ export default function Home() {
         canvas.height = height;
         const ctx = canvas.getContext('2d');
         ctx?.drawImage(img, 0, 0, width, height);
-        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('圧縮エラー'))), 'image/jpeg', 0.7);
+        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('圧縮失敗'))), 'image/jpeg', 0.7);
       };
       img.onerror = (err) => reject(err);
     });
@@ -171,7 +170,7 @@ export default function Home() {
   const handleCreateBillingEvent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!eventTitle || !eventAmount || targetMemberIds.length === 0) {
-      alert('請求名、金額、および対象部員を選択してください');
+      alert('請求名、金額、対象部員を入力してください');
       return;
     }
     setIsSubmitting(true);
@@ -188,7 +187,7 @@ export default function Home() {
       .single();
 
     if (evError || !eventData) {
-      alert('請求作成に失敗しました');
+      alert('作成に失敗しました');
       setIsSubmitting(false);
       return;
     }
@@ -211,11 +210,11 @@ export default function Home() {
     fetchData();
   };
 
-  // 2. 個人立替申請
+  // 2. 立替申請
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedMemberId) {
-      alert('ヘッダーで自分の名前を選択してください');
+      alert('部員を選択してください');
       return;
     }
     if (!expenseTitle || !expenseAmount) return;
@@ -236,7 +235,7 @@ export default function Home() {
           receiptUrl = publicUrlData.publicUrl;
         }
       } catch (err) {
-        console.error('画像アップロード失敗:', err);
+        console.error('画像保存エラー:', err);
       }
     }
 
@@ -258,7 +257,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 3. 部費からの支出・収入
+  // 3. 部費出納登録
   const handleCreateClubTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!txTitle || !txAmount) return;
@@ -281,7 +280,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 4. 納入ステータス変更確定（残額完済または未納リセット）
+  // 4. 請求ステータス変更（双方向連動対応）
   const executePaymentStatusChange = async () => {
     if (!confirmPaymentTarget) return;
     setIsSubmitting(true);
@@ -291,7 +290,6 @@ export default function Home() {
     const isClearing = confirmPaymentTarget.status !== '支払済';
 
     if (isClearing) {
-      // 完済にする
       await supabase
         .from('payments')
         .update({
@@ -301,7 +299,7 @@ export default function Home() {
         })
         .eq('id', confirmPaymentTarget.id);
     } else {
-      // 未納に戻す（相殺されていた相手の立替も未精算に戻す）
+      // 未納へ戻す場合: 相殺立替を未精算へ復元
       const linkedExpense = expenses.find(
         (e) => e.offset_payment_id === confirmPaymentTarget.id || e.id === confirmPaymentTarget.offset_expense_id
       );
@@ -333,7 +331,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 5. 【完全版】paid_amount を使った非破壊相殺ロジック
+  // 5. 相殺実行（双方向キーを相互保持）
   const handleExecuteOffset = async () => {
     if (!selectedExpenseForOffset || !targetPaymentIdForOffset) return;
     setIsSubmitting(true);
@@ -351,7 +349,7 @@ export default function Home() {
     const expenseItemName = selectedExpenseForOffset.title;
 
     if (expenseAmountVal >= remainingToPay) {
-      // パターンA: 立替額 >= 請求残額（請求を完済）
+      // 請求完済
       await supabase
         .from('payments')
         .update({
@@ -362,17 +360,15 @@ export default function Home() {
         })
         .eq('id', targetPayment.id);
 
-      const offsetLog = `📋 ${targetEvent.title}へ充当`;
       await supabase
         .from('expenses')
         .update({
           status: '精算済',
           offset_payment_id: targetPayment.id,
-          reject_reason: offsetLog,
+          reject_reason: `相殺: ${targetEvent.title}`,
         })
         .eq('id', selectedExpenseForOffset.id);
 
-      // 差額があれば、残額立替として安全に新規分割
       const diff = expenseAmountVal - remainingToPay;
       if (diff > 0) {
         await supabase.from('expenses').insert({
@@ -382,37 +378,33 @@ export default function Home() {
           category: selectedExpenseForOffset.category,
           receipt_url: selectedExpenseForOffset.receipt_url || '',
           status: '未精算',
-          reject_reason: `元申請 ¥${expenseAmountVal.toLocaleString()} より`,
+          reject_reason: `元申請 ¥${expenseAmountVal.toLocaleString()}`,
         });
-        alert(`相殺が完了しました！\n部費残額 ¥${remainingToPay.toLocaleString()} を完済し、残りの立替 ¥${diff.toLocaleString()} を未精算として残しました。`);
-      } else {
-        alert('相殺が完了しました！部費が完納されました。');
       }
+      alert('相殺しました');
     } else {
-      // パターンB: 立替額 < 請求残額（billing_eventsは壊さず、paid_amountに加算して一部納入）
+      // 一部納入
       const newPaidAmount = currentPaid + expenseAmountVal;
       await supabase
         .from('payments')
         .update({
           status: '一部納入',
           paid_amount: newPaidAmount,
-          payment_method: `相殺(${expenseItemName})`,
+          payment_method: `相殺 (${expenseItemName})`,
           offset_expense_id: selectedExpenseForOffset.id,
         })
         .eq('id', targetPayment.id);
 
-      const offsetLog = `📋 ${targetEvent.title}へ一部充当 (¥${expenseAmountVal.toLocaleString()})`;
       await supabase
         .from('expenses')
         .update({
           status: '精算済',
           offset_payment_id: targetPayment.id,
-          reject_reason: offsetLog,
+          reject_reason: `一部相殺: ${targetEvent.title}`,
         })
         .eq('id', selectedExpenseForOffset.id);
 
-      const remainingAmount = targetEvent.amount - newPaidAmount;
-      alert(`立替金 ¥${expenseAmountVal.toLocaleString()} を相殺に充当しました（一部納入）。\n残りの未納部費: ¥${remainingAmount.toLocaleString()}`);
+      alert(`相殺しました（残額: ¥${(targetEvent.amount - newPaidAmount).toLocaleString()}）`);
     }
 
     setShowOffsetModal(false);
@@ -422,34 +414,33 @@ export default function Home() {
     fetchData();
   };
 
-  // 6. 現金精算完了
+  // 6. 現金精算
   const handleCashSettle = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」(¥${expense.amount.toLocaleString()}) を現金精算済にしますか？`)) return;
+    if (!confirm(`「${expense.title}」を現金精算済にしますか？`)) return;
     await supabase
       .from('expenses')
       .update({
         status: '精算済',
-        reject_reason: '現金手渡し精算済',
+        reject_reason: '現金精算',
       })
       .eq('id', expense.id);
     fetchData();
   };
 
-  // 7. 【新機能】立替申請の完全削除（差戻しを廃止）
+  // 7. 立替削除
   const handleDeleteExpense = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」(¥${expense.amount.toLocaleString()}) を削除しますか？\n※この操作は取り消せません。`)) {
-      return;
-    }
+    if (!confirm(`「${expense.title}」を削除しますか？`)) return;
     await supabase.from('expenses').delete().eq('id', expense.id);
     fetchData();
   };
 
-  // 8. 双方向連動の取消処理
+  // 8. 立替取消（双方向巻き戻し）
   const handleRevertExpense = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」の精算を取り消し、未精算に戻しますか？\n（部費と相殺されていた場合、対象の部費も元に戻ります）`)) {
+    if (!confirm(`「${expense.title}」を未精算に戻しますか？\n（相殺されていた請求も連動して未納に戻ります）`)) {
       return;
     }
 
+    // 紐づく請求を探す
     const linkedPayment = payments.find(
       (p) => p.id === expense.offset_payment_id || p.offset_expense_id === expense.id
     );
@@ -466,7 +457,7 @@ export default function Home() {
           status: nextStatus,
           paid_amount: revertedPaid,
           payment_method: nextStatus === '未納' ? '現金/振込' : linkedPayment.payment_method,
-          offset_expense_id: null,
+          offset_expense_id: nextStatus === '未納' ? null : linkedPayment.offset_expense_id,
         })
         .eq('id', linkedPayment.id);
     }
@@ -485,7 +476,7 @@ export default function Home() {
 
   // CSVダウンロード
   const exportToCSV = () => {
-    const header = ['大分類', 'カテゴリ/種別', '対象者/出納元', '品名・使途', '請求/支出額', '既納額', '残債額', 'ステータス/備考', '日付'];
+    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額', '残額', '状態', '日付'];
     const rows: string[][] = [];
 
     payments.forEach((p) => {
@@ -493,15 +484,14 @@ export default function Home() {
       const mem = members.find((m) => m.id === p.member_id);
       const total = ev?.amount || 0;
       const paid = p.paid_amount || 0;
-      const remaining = Math.max(0, total - paid);
       rows.push([
-        '1_部費請求',
-        '部費・集金',
+        '請求',
+        '部費',
         mem?.name || '',
         ev?.title || '',
         String(total),
         String(paid),
-        String(remaining),
+        String(Math.max(0, total - paid)),
         `${p.status} (${p.payment_method || ''})`,
         ev?.due_date || '',
       ]);
@@ -509,7 +499,7 @@ export default function Home() {
 
     clubTransactions.forEach((t) => {
       rows.push([
-        '2_部費出納',
+        '出納',
         t.category,
         t.payment_source,
         t.title,
@@ -524,7 +514,7 @@ export default function Home() {
     expenses.forEach((e) => {
       const mem = members.find((m) => m.id === e.member_id);
       rows.push([
-        '3_個人立替',
+        '立替',
         e.category,
         mem?.name || '',
         e.title,
@@ -542,10 +532,9 @@ export default function Home() {
       'data:text/csv;charset=utf-8,\uFEFF' +
       [header.join(','), ...rows.map((r) => r.map((c) => `"${c}"`).join(','))].join('\n');
 
-    const encodedUri = encodeURI(csvContent);
     const link = document.createElement('a');
-    link.setAttribute('href', encodedUri);
-    link.setAttribute('download', `yacht_club_report_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('href', encodeURI(csvContent));
+    link.setAttribute('download', `会計明細_${new Date().toISOString().split('T')[0]}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -553,29 +542,29 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-800 pb-28">
-      {/* トップヘッダー */}
+      {/* ヘッダー */}
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-3">
         <div className="w-full flex flex-col md:flex-row md:items-center md:justify-between gap-3">
           <div className="flex justify-between items-center">
             <h1 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
-              <span className="text-xl">⛵</span> ヨット部 会計システム
+              <span>⛵</span> ヨット部 会計
             </h1>
             <button
               onClick={exportToCSV}
-              className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700 font-bold transition flex items-center gap-1"
+              className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700 font-bold transition"
             >
-              <span>📥</span> 項目別CSV出力
+              CSV出力
             </button>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 font-medium shrink-0">👤 現在の部員:</span>
+            <span className="text-xs text-slate-500 font-medium shrink-0">部員:</span>
             <select
               value={selectedMemberId}
               onChange={(e) => handleMemberChange(e.target.value)}
-              className="w-full md:w-64 p-2 border border-slate-300 rounded-xl bg-white text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-sm"
+              className="w-full md:w-64 p-2 border border-slate-300 rounded-xl bg-white text-xs font-bold text-slate-800 shadow-sm"
             >
-              <option value="">-- 部全体を表示 --</option>
+              <option value="">-- 全体 --</option>
               {members.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.grade}年 {m.name} ({m.role})
@@ -586,21 +575,19 @@ export default function Home() {
         </div>
       </header>
 
-      {/* メインコンテンツ */}
-      <main className="w-full px-4 py-4 max-w-7xl mx-auto space-y-5">
+      {/* メイン */}
+      <main className="w-full px-4 py-4 max-w-7xl mx-auto space-y-4">
         {loading ? (
-          <p className="text-xs text-slate-400 text-center py-20 font-medium">データを読み込み中...</p>
+          <p className="text-xs text-slate-400 text-center py-20 font-medium">読み込み中...</p>
         ) : (
           <>
-            {/* ============================================================== */}
-            {/* TAB 1: 👤 個人マイページ / 全体概要                          */}
-            {/* ============================================================== */}
+            {/* TAB 1: マイページ / 個人 */}
             {activeTab === 'personal' && (
               <div className="space-y-4">
                 {currentMember ? (
                   <div className="grid grid-cols-2 gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                     <div className="bg-red-50 p-3 rounded-xl border border-red-100">
-                      <span className="text-xs text-red-600 font-bold block">未納部費 (残額合計)</span>
+                      <span className="text-xs text-red-600 font-bold block">未納部費</span>
                       <span className="text-lg font-black text-red-700 tabular-nums">
                         ¥{getUnpaidTotal(currentMember.id).toLocaleString()}
                       </span>
@@ -613,26 +600,26 @@ export default function Home() {
                     </div>
                   </div>
                 ) : (
-                  <div className="p-3 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-800 text-center font-medium">
-                    現在「部全体」を表示しています。自分用の立替申請や納入状況を確認するには、上のメニューから自分の名前を選択してください。
+                  <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800 text-center">
+                    部員を選択すると個人の申請や残高を確認できます
                   </div>
                 )}
 
-                {/* クイックアクション */}
+                {/* ボタン */}
                 <div className="grid grid-cols-2 gap-3">
                   {currentMember ? (
                     <button
                       onClick={() => setShowExpenseModal(true)}
-                      className="p-3.5 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5"
+                      className="p-3.5 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
                     >
-                      <span className="text-base">📸</span> 立替を申請する
+                      立替を申請
                     </button>
                   ) : (
                     <button
                       onClick={() => setShowClubTxModal(true)}
-                      className="p-3.5 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5"
+                      className="p-3.5 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
                     >
-                      <span className="text-base">💸</span> 部費からの支出・収入を記録
+                      部費の出納を記録
                     </button>
                   )}
 
@@ -641,26 +628,60 @@ export default function Home() {
                       setTargetMemberIds(members.map((m) => m.id));
                       setShowEventModal(true);
                     }}
-                    className="p-3.5 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition flex items-center justify-center gap-1.5"
+                    className="p-3.5 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-xs shadow-md transition"
                   >
-                    <span className="text-base">📋</span> 請求を作成する
+                    請求を作成
                   </button>
                 </div>
 
-                {/* 2カラムレイアウト */}
+                {/* 一覧 */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {/* 請求・支払いリスト（一部納入対応） */}
+                  {/* 請求一覧 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <h2 className="font-black text-xs text-slate-500 uppercase tracking-wider">
-                      {currentMember ? `${currentMember.name} さんの請求状況` : '部費・請求一覧'}
-                    </h2>
+                    <div className="flex justify-between items-center">
+                      <h2 className="font-black text-xs text-slate-500 uppercase">
+                        {currentMember ? `${currentMember.name}の請求` : '請求状況'}
+                      </h2>
+                      {/* 請求フィルター */}
+                      <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
+                        <button
+                          onClick={() => setPaymentFilter('unpaid')}
+                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'unpaid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                        >
+                          未納
+                        </button>
+                        <button
+                          onClick={() => setPaymentFilter('paid')}
+                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'paid' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                        >
+                          支払済
+                        </button>
+                        <button
+                          onClick={() => setPaymentFilter('all')}
+                          className={`px-2 py-1 rounded-md transition ${paymentFilter === 'all' ? 'bg-white text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                        >
+                          すべて
+                        </button>
+                      </div>
+                    </div>
+
                     {payments
                       .filter((p) => !currentMember || p.member_id === currentMember.id)
+                      .filter((p) => {
+                        if (paymentFilter === 'unpaid') return p.status !== '支払済';
+                        if (paymentFilter === 'paid') return p.status === '支払済';
+                        return true;
+                      })
                       .length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">該当する請求はありません</p>
+                      <p className="text-xs text-slate-400 text-center py-6">該当データはありません</p>
                     ) : (
                       payments
                         .filter((p) => !currentMember || p.member_id === currentMember.id)
+                        .filter((p) => {
+                          if (paymentFilter === 'unpaid') return p.status !== '支払済';
+                          if (paymentFilter === 'paid') return p.status === '支払済';
+                          return true;
+                        })
                         .map((p) => {
                           const ev = events.find((e) => e.id === p.billing_event_id);
                           const member = members.find((m) => m.id === p.member_id);
@@ -671,16 +692,16 @@ export default function Home() {
                           return (
                             <div
                               key={p.id}
-                              className="p-3 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center hover:bg-slate-100/70 transition"
+                              className="p-3 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center"
                             >
                               <div className="space-y-0.5">
                                 <p className="font-bold text-xs text-slate-800">{ev?.title}</p>
                                 <p className="text-[11px] text-slate-500">
-                                  {member?.name} | 請求額: <span className="font-bold text-slate-700 tabular-nums">¥{evAmount.toLocaleString()}</span>
+                                  {member?.name} | ¥{evAmount.toLocaleString()}
                                 </p>
                                 {p.status === '一部納入' && (
                                   <p className="text-[10px] text-amber-700 font-bold">
-                                    納入済: ¥{paidAmount.toLocaleString()} (残額: ¥{remainingAmount.toLocaleString()})
+                                    残: ¥{remainingAmount.toLocaleString()} (納入済: ¥{paidAmount.toLocaleString()})
                                   </p>
                                 )}
                                 {p.payment_method && p.status !== '未納' && (
@@ -708,12 +729,13 @@ export default function Home() {
                     )}
                   </section>
 
-                  {/* 立替・経費リスト（差戻しを削除ボタンに統一） */}
+                  {/* 立替一覧 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <div className="flex justify-between items-center flex-wrap gap-2">
-                      <h2 className="font-black text-xs text-slate-500 uppercase tracking-wider">
-                        {currentMember ? `${currentMember.name} さんの立替申請` : '個人立替一覧'}
+                    <div className="flex justify-between items-center">
+                      <h2 className="font-black text-xs text-slate-500 uppercase">
+                        {currentMember ? `${currentMember.name}の立替` : '立替一覧'}
                       </h2>
+                      {/* 立替フィルター */}
                       <div className="flex bg-slate-100 p-0.5 rounded-lg text-[10px] font-bold">
                         <button
                           onClick={() => setExpenseFilter('unsettled')}
@@ -744,7 +766,7 @@ export default function Home() {
                         return true;
                       })
                       .length === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">該当する立替申請はありません</p>
+                      <p className="text-xs text-slate-400 text-center py-6">該当データはありません</p>
                     ) : (
                       expenses
                         .filter((e) => !currentMember || e.member_id === currentMember.id)
@@ -764,27 +786,22 @@ export default function Home() {
                                 {e.receipt_url ? (
                                   <div
                                     onClick={() => setPreviewImageUrl(e.receipt_url || null)}
-                                    className="w-14 h-14 rounded-lg bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer relative group"
+                                    className="w-14 h-14 rounded-lg bg-slate-200 shrink-0 overflow-hidden border border-slate-200 cursor-pointer"
                                   >
-                                    {/* eslint-disable-next-line @next/next/no-img-element */}
                                     <img
                                       src={e.receipt_url}
                                       alt="レシート"
-                                      className="w-full h-full object-cover group-hover:scale-105 transition"
+                                      className="w-full h-full object-cover"
                                     />
-                                    <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-[9px] text-white font-bold">
-                                      拡大
-                                    </div>
                                   </div>
                                 ) : (
-                                  <div className="w-14 h-14 rounded-lg bg-slate-100 shrink-0 border border-slate-200 flex flex-col items-center justify-center text-slate-400 text-[10px]">
-                                    <span>📄</span>
-                                    <span>無</span>
+                                  <div className="w-14 h-14 rounded-lg bg-slate-100 shrink-0 border border-slate-200 flex items-center justify-center text-slate-400 text-xs">
+                                    無
                                   </div>
                                 )}
 
                                 <div className="flex-1 min-w-0">
-                                  <div className="flex items-center gap-1.5 flex-wrap">
+                                  <div className="flex items-center gap-1.5">
                                     <span className="text-[9px] bg-slate-200 text-slate-700 px-1.5 py-0.5 rounded font-bold">
                                       {e.category}
                                     </span>
@@ -815,7 +832,6 @@ export default function Home() {
                                 </div>
                               )}
 
-                              {/* 未精算時の操作（相殺 / 現金精算 / 🗑️ 削除） */}
                               {e.status === '未精算' && (
                                 <div className="grid grid-cols-3 gap-1.5 pt-2 border-t border-slate-200">
                                   <button
@@ -826,39 +842,38 @@ export default function Home() {
                                       setShowOffsetModal(true);
                                     }}
                                     disabled={!canOffset}
-                                    className={`py-1.5 px-1 text-[11px] font-bold rounded-lg shadow-sm transition flex items-center justify-center gap-1 ${
+                                    className={`py-1.5 text-[11px] font-bold rounded-lg transition ${
                                       canOffset
                                         ? 'bg-amber-500 hover:bg-amber-600 text-white'
                                         : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                                     }`}
                                   >
-                                    <span>🔄</span> 相殺
+                                    相殺
                                   </button>
 
                                   <button
                                     onClick={() => handleCashSettle(e)}
-                                    className="py-1.5 px-1 bg-slate-800 hover:bg-slate-900 active:scale-[0.98] text-white text-[11px] font-bold rounded-lg shadow-sm transition flex items-center justify-center gap-1"
+                                    className="py-1.5 bg-slate-800 hover:bg-slate-900 text-white text-[11px] font-bold rounded-lg transition"
                                   >
-                                    <span>💵</span> 現金精算
+                                    現金精算
                                   </button>
 
                                   <button
                                     onClick={() => handleDeleteExpense(e)}
-                                    className="py-1.5 px-1 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-[11px] font-bold rounded-lg transition flex items-center justify-center gap-1"
+                                    className="py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-[11px] font-bold rounded-lg transition"
                                   >
-                                    <span>🗑️</span> 削除
+                                    削除
                                   </button>
                                 </div>
                               )}
 
-                              {/* 精算済の場合: 取消ボタン */}
                               {e.status === '精算済' && (
                                 <div className="flex justify-end pt-1">
                                   <button
                                     onClick={() => handleRevertExpense(e)}
-                                    className="text-[10px] text-slate-400 hover:text-slate-600 font-medium underline flex items-center gap-0.5"
+                                    className="text-[10px] text-slate-400 hover:text-slate-600 font-medium underline"
                                   >
-                                    <span>↩</span> 未精算に戻す
+                                    未精算に戻す
                                   </button>
                                 </div>
                               )}
@@ -871,29 +886,24 @@ export default function Home() {
               </div>
             )}
 
-            {/* ============================================================== */}
-            {/* TAB 2: 📊 全体会計                                            */}
-            {/* ============================================================== */}
+            {/* TAB 2: 全体会計 */}
             {activeTab === 'club' && (
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="md:col-span-2 bg-gradient-to-br from-slate-950 via-slate-900 to-slate-800 text-white p-5 rounded-3xl shadow-lg space-y-3">
-                    <div className="flex justify-between items-center text-xs text-slate-400">
-                      <span>部全体の資金残高（口座＋現金）</span>
-                      <span className="text-[10px] bg-blue-500/20 text-blue-300 px-2 py-0.5 rounded-full font-bold">健全</span>
-                    </div>
-                    <div className="text-3xl sm:text-4xl font-black tracking-tight text-white tabular-nums">
+                  <div className="md:col-span-2 bg-slate-900 text-white p-5 rounded-3xl shadow-lg space-y-3">
+                    <span className="text-xs text-slate-400">部の資金残高</span>
+                    <div className="text-3xl sm:text-4xl font-black tabular-nums">
                       ¥{estimatedClubTreasury.toLocaleString()}
                     </div>
                     <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-800 text-xs">
                       <div>
-                        <span className="text-slate-400 text-[10px] block">総入金額（部費納入+寄付）</span>
+                        <span className="text-slate-400 text-[10px] block">総入金</span>
                         <span className="font-bold text-emerald-400 tabular-nums">
                           +¥{(totalCollectedDues + totalClubDonations).toLocaleString()}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-400 text-[10px] block">総実支出（直接+精算立替）</span>
+                        <span className="text-slate-400 text-[10px] block">総支出</span>
                         <span className="font-bold text-rose-400 tabular-nums">
                           -¥{(totalDirectClubExpenses + totalReimbursedExpenses).toLocaleString()}
                         </span>
@@ -902,28 +912,28 @@ export default function Home() {
                   </div>
 
                   <div className="bg-white p-4 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-center">
-                    <p className="text-xs text-slate-500 font-medium">部費からの支出・収入</p>
-                    <p className="text-[11px] text-slate-400 mt-1 mb-3">エントリー費、係留料、寄付金を記録</p>
+                    <p className="text-xs text-slate-500 font-medium">部費出納</p>
+                    <p className="text-[11px] text-slate-400 mt-1 mb-3">エントリー費・係留料・寄付など</p>
                     <button
                       onClick={() => setShowClubTxModal(true)}
-                      className="w-full p-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs shadow-sm transition flex items-center justify-center gap-1.5"
+                      className="w-full p-3 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-xs transition"
                     >
-                      <span>➕</span> 収支レコードを追加
+                      出納を記録
                     </button>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                  {/* カテゴリ別内訳 */}
+                  {/* カテゴリ別 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
                     <div className="flex justify-between items-center">
-                      <h2 className="font-black text-xs text-slate-500 uppercase tracking-wider">支出カテゴリ別 内訳</h2>
+                      <h2 className="font-black text-xs text-slate-500 uppercase">支出カテゴリ別</h2>
                       <span className="text-xs font-bold text-slate-700 tabular-nums">
-                        総支出: ¥{totalAllExpenses.toLocaleString()}
+                        計: ¥{totalAllExpenses.toLocaleString()}
                       </span>
                     </div>
                     {totalAllExpenses === 0 ? (
-                      <p className="text-xs text-slate-400 text-center py-6">支出データはありません</p>
+                      <p className="text-xs text-slate-400 text-center py-6">データはありません</p>
                     ) : (
                       <div className="space-y-3">
                         {Object.entries(categorySpendingMap).map(([cat, amt]) => {
@@ -936,8 +946,8 @@ export default function Home() {
                                   ¥{amt.toLocaleString()} ({percent}%)
                                 </span>
                               </div>
-                              <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
-                                <div className="bg-blue-600 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
+                              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+                                <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${percent}%` }}></div>
                               </div>
                             </div>
                           );
@@ -946,11 +956,9 @@ export default function Home() {
                     )}
                   </section>
 
-                  {/* 具体的な品名・使途一覧 */}
+                  {/* 明細 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <h2 className="font-black text-xs text-slate-500 uppercase tracking-wider">
-                      支出明細・購入品目（何に使ったか）
-                    </h2>
+                    <h2 className="font-black text-xs text-slate-500 uppercase">支出明細</h2>
                     <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                       {clubTransactions
                         .filter((t) => t.type === '支出')
@@ -964,7 +972,7 @@ export default function Home() {
                                 <span className="text-xs font-bold text-slate-800">{t.title}</span>
                               </div>
                               <p className="text-[10px] text-slate-500 mt-1">
-                                {t.category} | {t.payment_source} {t.event_tag && `[${t.event_tag}]`}
+                                {t.category} | {t.payment_source}
                               </p>
                             </div>
                             <span className="text-xs font-black tabular-nums text-slate-800">
@@ -987,7 +995,7 @@ export default function Home() {
                                   <span className="text-xs font-bold text-slate-800">{e.title}</span>
                                 </div>
                                 <p className="text-[10px] text-slate-500 mt-1">
-                                  {e.category} | 購入者: {mem?.name}
+                                  {e.category} | {mem?.name}
                                 </p>
                               </div>
                               <span className="text-xs font-black tabular-nums text-slate-800">
@@ -1002,12 +1010,10 @@ export default function Home() {
               </div>
             )}
 
-            {/* ============================================================== */}
-            {/* TAB 3: 👥 部員別カルテ                                          */}
-            {/* ============================================================== */}
+            {/* TAB 3: 部員カルテ */}
             {activeTab === 'members' && (
               <div className="space-y-3">
-                <p className="text-xs text-slate-500">部員をタップすると、個別の全納入・立替履歴（カルテ）を確認できます。</p>
+                <p className="text-xs text-slate-500">部員を選択すると個別の履歴を確認できます</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {members.map((m) => {
                     const unpaid = getUnpaidTotal(m.id);
@@ -1018,7 +1024,7 @@ export default function Home() {
                       <div
                         key={m.id}
                         onClick={() => setSelectedMemberDetail(m)}
-                        className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm hover:border-blue-400 hover:shadow-md transition cursor-pointer flex flex-col justify-between space-y-3"
+                        className="p-4 bg-white border border-slate-200 rounded-2xl shadow-sm hover:border-blue-400 transition cursor-pointer flex flex-col justify-between space-y-3"
                       >
                         <div className="flex justify-between items-start">
                           <div>
@@ -1048,7 +1054,7 @@ export default function Home() {
                             </span>
                           </div>
                           <div className="bg-slate-50 p-2 rounded-xl">
-                            <span className="text-[10px] text-slate-400 block font-medium">立替未精算</span>
+                            <span className="text-[10px] text-slate-400 block font-medium">未精算立替</span>
                             <span
                               className={`text-xs font-bold tabular-nums ${
                                 unreimbursed > 0 ? 'text-blue-600' : 'text-slate-400'
@@ -1068,13 +1074,13 @@ export default function Home() {
         )}
       </main>
 
-      {/* ボトムナビバー */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 shadow-2xl safe-area-pb">
+      {/* ボトムナビ */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 shadow-2xl">
         <div className="max-w-md mx-auto grid grid-cols-3 h-16">
           <button
             onClick={() => setActiveTab('personal')}
             className={`flex flex-col items-center justify-center gap-1 transition ${
-              activeTab === 'personal' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium hover:text-slate-600'
+              activeTab === 'personal' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
             <span className="text-xl">👤</span>
@@ -1083,7 +1089,7 @@ export default function Home() {
           <button
             onClick={() => setActiveTab('club')}
             className={`flex flex-col items-center justify-center gap-1 transition ${
-              activeTab === 'club' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium hover:text-slate-600'
+              activeTab === 'club' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
             <span className="text-xl">📊</span>
@@ -1092,24 +1098,20 @@ export default function Home() {
           <button
             onClick={() => setActiveTab('members')}
             className={`flex flex-col items-center justify-center gap-1 transition ${
-              activeTab === 'members' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium hover:text-slate-600'
+              activeTab === 'members' ? 'text-blue-600 font-black' : 'text-slate-400 font-medium'
             }`}
           >
             <span className="text-xl">👥</span>
-            <span className="text-[11px]">部員カルテ</span>
+            <span className="text-[11px]">部員一覧</span>
           </button>
         </div>
       </nav>
 
-      {/* ============================================================== */}
-      {/* モーダル群                                                     */}
-      {/* ============================================================== */}
-
-      {/* 納入確認モーダル */}
+      {/* モーダル: 納入確認 */}
       {confirmPaymentTarget && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-900">納入ステータスの変更</h3>
+            <h3 className="font-black text-base text-slate-900">納入状況の変更</h3>
             {(() => {
               const ev = events.find((e) => e.id === confirmPaymentTarget.billing_event_id);
               const mem = members.find((m) => m.id === confirmPaymentTarget.member_id);
@@ -1122,18 +1124,11 @@ export default function Home() {
                 <div className="space-y-3">
                   <div className="p-3 bg-slate-50 rounded-xl text-xs space-y-1">
                     <p className="font-bold text-slate-800">{ev?.title}</p>
-                    <p className="text-slate-600">対象者: {mem?.name}</p>
-                    <p className="text-slate-600 font-bold">総請求額: ¥{totalAmount.toLocaleString()}</p>
+                    <p className="text-slate-600">対象: {mem?.name}</p>
+                    <p className="text-slate-600 font-bold">請求額: ¥{totalAmount.toLocaleString()}</p>
                     {confirmPaymentTarget.status === '一部納入' && (
-                      <p className="text-amber-700 font-bold">納入済: ¥{paidAmount.toLocaleString()} / 残額: ¥{remainingAmount.toLocaleString()}</p>
+                      <p className="text-amber-700 font-bold">残額: ¥{remainingAmount.toLocaleString()}</p>
                     )}
-                    <p className="pt-1 text-slate-500">
-                      操作: {isClearing ? (
-                        <span className="font-bold text-blue-600">残額 ¥{remainingAmount.toLocaleString()} を完済にする</span>
-                      ) : (
-                        <span className="font-bold text-rose-600">未納にリセットする</span>
-                      )}
-                    </p>
                   </div>
 
                   {isClearing && (
@@ -1149,7 +1144,7 @@ export default function Home() {
                               : 'bg-white text-slate-700 border-slate-200'
                           }`}
                         >
-                          部口座振込
+                          口座振込
                         </button>
                         <button
                           type="button"
@@ -1160,7 +1155,7 @@ export default function Home() {
                               : 'bg-white text-slate-700 border-slate-200'
                           }`}
                         >
-                          現金手渡し
+                          現金
                         </button>
                       </div>
                     </div>
@@ -1172,7 +1167,7 @@ export default function Home() {
                       onClick={() => setConfirmPaymentTarget(null)}
                       className="flex-1 py-2 text-xs border border-slate-200 rounded-xl"
                     >
-                      キャンセル
+                      戻る
                     </button>
                     <button
                       type="button"
@@ -1180,7 +1175,7 @@ export default function Home() {
                       disabled={isSubmitting}
                       className="flex-1 py-2 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md"
                     >
-                      {isSubmitting ? '更新中...' : '変更を確定'}
+                      {isClearing ? '支払済にする' : '未納に戻す'}
                     </button>
                   </div>
                 </div>
@@ -1190,32 +1185,24 @@ export default function Home() {
         </div>
       )}
 
-      {/* 画像プレビュー */}
+      {/* モーダル: レシート画像 */}
       {previewImageUrl && (
         <div
           onClick={() => setPreviewImageUrl(null)}
           className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50 cursor-pointer"
         >
-          <div className="max-w-lg w-full flex flex-col items-center gap-3">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={previewImageUrl} alt="拡大レシート" className="max-h-[80vh] w-auto rounded-xl object-contain shadow-2xl" />
-            <button className="text-white text-xs bg-white/20 hover:bg-white/30 px-4 py-1.5 rounded-full font-bold">
-              タップして閉じる
-            </button>
-          </div>
+          <img src={previewImageUrl} alt="レシート" className="max-h-[80vh] w-auto rounded-xl object-contain" />
         </div>
       )}
 
-      {/* 部員詳細カルテ */}
+      {/* モーダル: 部員カルテ */}
       {selectedMemberDetail && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
             <div className="flex justify-between items-start border-b pb-3">
-              <div>
-                <h3 className="font-black text-base text-slate-800">
-                  {selectedMemberDetail.grade}年 {selectedMemberDetail.name} ({selectedMemberDetail.role})
-                </h3>
-              </div>
+              <h3 className="font-black text-base text-slate-800">
+                {selectedMemberDetail.grade}年 {selectedMemberDetail.name} ({selectedMemberDetail.role})
+              </h3>
               <button onClick={() => setSelectedMemberDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold text-lg">
                 ✕
               </button>
@@ -1224,7 +1211,7 @@ export default function Home() {
             <div className="space-y-3">
               <h4 className="text-xs font-bold text-slate-600">納入履歴</h4>
               {payments.filter((p) => p.member_id === selectedMemberDetail.id).length === 0 ? (
-                <p className="text-[11px] text-slate-400">履歴はありません</p>
+                <p className="text-[11px] text-slate-400">データはありません</p>
               ) : (
                 payments
                   .filter((p) => p.member_id === selectedMemberDetail.id)
@@ -1248,7 +1235,7 @@ export default function Home() {
 
               <h4 className="text-xs font-bold text-slate-600 pt-2">立替履歴</h4>
               {expenses.filter((e) => e.member_id === selectedMemberDetail.id).length === 0 ? (
-                <p className="text-[11px] text-slate-400">立替はありません</p>
+                <p className="text-[11px] text-slate-400">データはありません</p>
               ) : (
                 expenses
                   .filter((e) => e.member_id === selectedMemberDetail.id)
@@ -1258,7 +1245,7 @@ export default function Home() {
                         <p className="font-semibold text-slate-800">
                           {e.title} (¥{e.amount.toLocaleString()})
                         </p>
-                        <p className="text-[10px] text-slate-500">{e.category} {e.reject_reason && `[${e.reject_reason}]`}</p>
+                        <p className="text-[10px] text-slate-500">{e.category}</p>
                       </div>
                       <span className="font-bold text-slate-600">{e.status}</span>
                     </div>
@@ -1268,7 +1255,7 @@ export default function Home() {
 
             <button
               onClick={() => setSelectedMemberDetail(null)}
-              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl transition"
+              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl"
             >
               閉じる
             </button>
@@ -1276,7 +1263,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* 請求作成モーダル */}
+      {/* モーダル: 請求作成 */}
       {showEventModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
@@ -1286,7 +1273,7 @@ export default function Home() {
                 <label className="text-xs text-slate-600 font-medium">請求タイトル</label>
                 <input
                   type="text"
-                  placeholder="例: 10月度部費、秋インカレ遠征費"
+                  placeholder="例: 10月度部費"
                   required
                   value={eventTitle}
                   onChange={(e) => setEventTitle(e.target.value)}
@@ -1345,10 +1332,10 @@ export default function Home() {
               </div>
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowEventModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
-                  キャンセル
+                  戻る
                 </button>
                 <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
-                  {isSubmitting ? '作成中...' : '作成する'}
+                  作成
                 </button>
               </div>
             </form>
@@ -1356,17 +1343,17 @@ export default function Home() {
         </div>
       )}
 
-      {/* 立替申請モーダル */}
+      {/* モーダル: 立替申請 */}
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 className="font-black text-base text-slate-800">立替金の申請</h3>
             <form onSubmit={handleCreateExpense} className="space-y-3">
               <div>
-                <label className="text-xs text-slate-600 font-medium">品名・用途</label>
+                <label className="text-xs text-slate-600 font-medium">用途・品名</label>
                 <input
                   type="text"
-                  placeholder="例: レスキュー艇給油代、ロープ購入"
+                  placeholder="例: ガソリン代"
                   required
                   value={expenseTitle}
                   onChange={(e) => setExpenseTitle(e.target.value)}
@@ -1399,7 +1386,7 @@ export default function Home() {
                 </select>
               </div>
               <div>
-                <label className="text-xs text-slate-600 font-medium">レシート写真（自動圧縮）</label>
+                <label className="text-xs text-slate-600 font-medium">レシート写真</label>
                 <input
                   type="file"
                   accept="image/*"
@@ -1410,10 +1397,10 @@ export default function Home() {
               </div>
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowExpenseModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
-                  キャンセル
+                  戻る
                 </button>
                 <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-blue-600 text-white font-bold rounded-xl shadow-md">
-                  {isSubmitting ? '送信中...' : '申請する'}
+                  申請
                 </button>
               </div>
             </form>
@@ -1421,11 +1408,11 @@ export default function Home() {
         </div>
       )}
 
-      {/* 部費からの支出・収入モーダル */}
+      {/* モーダル: 部費出納 */}
       {showClubTxModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">部費からの支出・収入の記録</h3>
+            <h3 className="font-black text-base text-slate-800">部費出納の記録</h3>
             <form onSubmit={handleCreateClubTransaction} className="space-y-3">
               <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl text-xs font-bold">
                 <button
@@ -1433,22 +1420,22 @@ export default function Home() {
                   onClick={() => setTxType('支出')}
                   className={`py-1.5 rounded-lg ${txType === '支出' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600'}`}
                 >
-                  部費からの支出
+                  支出
                 </button>
                 <button
                   type="button"
                   onClick={() => setTxType('収入')}
                   className={`py-1.5 rounded-lg ${txType === '収入' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600'}`}
                 >
-                  寄付・助成金収入
+                  収入
                 </button>
               </div>
 
               <div>
-                <label className="text-xs text-slate-600 font-medium">品名・内容 (何に使ったか)</label>
+                <label className="text-xs text-slate-600 font-medium">品名・内容</label>
                 <input
                   type="text"
-                  placeholder={txType === '支出' ? '例: インカレ参加料、ワイヤー・シート購入' : '例: OB〇〇先輩からの寄付、大学支援金'}
+                  placeholder="例: インカレ参加料"
                   required
                   value={txTitle}
                   onChange={(e) => setTxTitle(e.target.value)}
@@ -1481,13 +1468,13 @@ export default function Home() {
                       <option value="艇体・セール・艤装費">艇体・セール・艤装費</option>
                       <option value="ハーバー係留・スロープ料">ハーバー係留・スロープ料</option>
                       <option value="合宿所・施設利用料">合宿所・施設利用料</option>
-                      <option value="その他部の直接支出">その他部の直接支出</option>
+                      <option value="その他">その他</option>
                     </>
                   ) : (
                     <>
-                      <option value="OB・OG寄付金">OB・OG寄付金</option>
-                      <option value="大学助成金・支援費">大学助成金・支援費</option>
-                      <option value="その他収入">その他収入</option>
+                      <option value="OB寄付金">OB寄付金</option>
+                      <option value="大学助成金">大学助成金</option>
+                      <option value="その他">その他</option>
                     </>
                   )}
                 </select>
@@ -1519,10 +1506,10 @@ export default function Home() {
 
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowClubTxModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
-                  キャンセル
+                  戻る
                 </button>
                 <button type="submit" disabled={isSubmitting} className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
-                  {isSubmitting ? '登録中...' : '登録する'}
+                  登録
                 </button>
               </div>
             </form>
@@ -1530,18 +1517,18 @@ export default function Home() {
         </div>
       )}
 
-      {/* 相殺モーダル（リアルタイム計算プレビュー） */}
+      {/* モーダル: 相殺 */}
       {showOffsetModal && selectedExpenseForOffset && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-xs space-y-4 shadow-2xl">
-            <h3 className="font-black text-base text-slate-800">立替金を部費へ充当（相殺）</h3>
-            <div className="bg-amber-50 p-3 rounded-xl text-xs text-amber-900 border border-amber-200 space-y-1">
-              <p>対象立替: <span className="font-bold">{selectedExpenseForOffset.title}</span></p>
-              <p className="font-black text-sm">立替金額: ¥{selectedExpenseForOffset.amount.toLocaleString()}</p>
+            <h3 className="font-black text-base text-slate-800">立替金を部費へ相殺</h3>
+            <div className="bg-amber-50 p-3 rounded-xl text-xs text-amber-900 border border-amber-200 space-y-0.5">
+              <p>立替: <span className="font-bold">{selectedExpenseForOffset.title}</span></p>
+              <p className="font-bold">金額: ¥{selectedExpenseForOffset.amount.toLocaleString()}</p>
             </div>
 
             <div>
-              <label className="text-xs text-slate-600 font-medium">充当先の未納請求を選択</label>
+              <label className="text-xs text-slate-600 font-medium">充当先の未納請求</label>
               <select
                 value={targetPaymentIdForOffset}
                 onChange={(e) => setTargetPaymentIdForOffset(e.target.value)}
@@ -1554,14 +1541,14 @@ export default function Home() {
                     const remaining = (ev?.amount || 0) - (p.paid_amount || 0);
                     return (
                       <option key={p.id} value={p.id}>
-                        {ev?.title} (残債: ¥{remaining.toLocaleString()})
+                        {ev?.title} (残: ¥{remaining.toLocaleString()})
                       </option>
                     );
                   })}
               </select>
             </div>
 
-            {/* プレビュー計算表示 */}
+            {/* 結果プレビュー */}
             {(() => {
               const targetP = payments.find((p) => p.id === targetPaymentIdForOffset);
               const targetE = events.find((e) => e.id === targetP?.billing_event_id);
@@ -1572,17 +1559,14 @@ export default function Home() {
 
               return (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
-                  <p className="font-bold text-slate-700">相殺結果プレビュー:</p>
+                  <p className="font-bold text-slate-700">結果:</p>
                   {diff >= 0 ? (
                     <>
-                      <p className="text-green-600 font-bold">・請求「{targetE.title}」: 完済</p>
-                      {diff > 0 && <p className="text-blue-700 font-bold">・立替残額: ¥{diff.toLocaleString()} が未精算として残ります</p>}
+                      <p className="text-green-600 font-bold">・請求: 完済</p>
+                      {diff > 0 && <p className="text-blue-700 font-bold">・立替残額: ¥{diff.toLocaleString()}</p>}
                     </>
                   ) : (
-                    <>
-                      <p className="text-amber-700 font-bold">・請求「{targetE.title}」: 一部納入</p>
-                      <p className="text-red-600 font-bold">・請求残額: ¥{Math.abs(diff).toLocaleString()} が未納として残ります</p>
-                    </>
+                    <p className="text-amber-700 font-bold">・請求残額: ¥{Math.abs(diff).toLocaleString()}</p>
                   )}
                 </div>
               );
@@ -1590,7 +1574,7 @@ export default function Home() {
 
             <div className="flex gap-2 pt-2">
               <button type="button" onClick={() => setShowOffsetModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
-                キャンセル
+                戻る
               </button>
               <button
                 type="button"
@@ -1598,7 +1582,7 @@ export default function Home() {
                 disabled={isSubmitting}
                 className="flex-1 py-2.5 text-xs bg-amber-500 text-white font-bold rounded-xl shadow-md"
               >
-                {isSubmitting ? '処理中...' : '相殺を実行'}
+                相殺を実行
               </button>
             </div>
           </div>
