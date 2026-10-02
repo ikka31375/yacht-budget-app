@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
-import { Member, Payment, Expense, BillingEvent, ClubTransaction } from '@/types';
+import { Member, Payment, Expense, BillingEvent, ClubTransaction, OffsetTransaction } from '@/types';
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<'personal' | 'club' | 'members'>('personal');
@@ -12,6 +12,7 @@ export default function Home() {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [events, setEvents] = useState<BillingEvent[]>([]);
   const [clubTransactions, setClubTransactions] = useState<ClubTransaction[]>([]);
+  const [offsetTransactions, setOffsetTransactions] = useState<OffsetTransaction[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
 
   // フィルター
@@ -23,6 +24,7 @@ export default function Home() {
   const [showExpenseModal, setShowExpenseModal] = useState(false);
   const [showClubTxModal, setShowClubTxModal] = useState(false);
   const [showOffsetModal, setShowOffsetModal] = useState(false);
+  const [showOffsetHistoryModal, setShowOffsetHistoryModal] = useState(false);
   const [selectedMemberDetail, setSelectedMemberDetail] = useState<Member | null>(null);
   const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
@@ -54,6 +56,7 @@ export default function Home() {
   // フォーム: 相殺
   const [selectedExpenseForOffset, setSelectedExpenseForOffset] = useState<Expense | null>(null);
   const [targetPaymentIdForOffset, setTargetPaymentIdForOffset] = useState<string>('');
+  const [offsetCustomAmount, setOffsetCustomAmount] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -70,6 +73,7 @@ export default function Home() {
     const { data: eData } = await supabase.from('expenses').select('*').order('created_at', { ascending: false });
     const { data: bData } = await supabase.from('billing_events').select('*').order('created_at', { ascending: false });
     const { data: cData } = await supabase.from('club_transactions').select('*').order('created_at', { ascending: false });
+    const { data: oData } = await supabase.from('offset_transactions').select('*').order('created_at', { ascending: false });
 
     if (mData) {
       setMembers(mData);
@@ -79,6 +83,7 @@ export default function Home() {
     if (eData) setExpenses(eData);
     if (bData) setEvents(bData);
     if (cData) setClubTransactions(cData);
+    if (oData) setOffsetTransactions(oData);
     setLoading(false);
   };
 
@@ -89,7 +94,7 @@ export default function Home() {
 
   const currentMember = members.find((m) => m.id === selectedMemberId);
 
-  // 金額計算（一部納入・一部精算対応）
+  // 金額計算
   const getUnpaidTotal = (memberId: string) => {
     return payments
       .filter((p) => p.member_id === memberId && p.status !== '支払済')
@@ -111,9 +116,11 @@ export default function Home() {
       }, 0);
   };
 
+  // 全体会計残高計算
+  const totalOffsetAmount = offsetTransactions.reduce((sum, o) => sum + o.amount, 0);
+
   const totalCollectedDues = payments
-    .filter((p) => p.payment_method !== '相殺')
-    .reduce((sum, p) => sum + (p.paid_amount || 0), 0);
+    .reduce((sum, p) => sum + (p.paid_amount || 0), 0) - totalOffsetAmount;
 
   const totalClubDonations = clubTransactions
     .filter((t) => t.type === '収入')
@@ -124,8 +131,7 @@ export default function Home() {
     .reduce((sum, t) => sum + t.amount, 0);
 
   const totalReimbursedExpenses = expenses
-    .filter((e) => e.status === '精算済' && !e.offset_payment_id)
-    .reduce((sum, e) => sum + e.amount, 0);
+    .reduce((sum, e) => sum + (e.settled_amount || 0), 0) - totalOffsetAmount;
 
   const estimatedClubTreasury =
     totalCollectedDues + totalClubDonations - totalDirectClubExpenses - totalReimbursedExpenses;
@@ -137,9 +143,9 @@ export default function Home() {
       categorySpendingMap[t.category] = (categorySpendingMap[t.category] || 0) + t.amount;
     });
   expenses
-    .filter((e) => e.status === '精算済')
+    .filter((e) => (e.settled_amount || 0) > 0)
     .forEach((e) => {
-      categorySpendingMap[e.category] = (categorySpendingMap[e.category] || 0) + e.amount;
+      categorySpendingMap[e.category] = (categorySpendingMap[e.category] || 0) + (e.settled_amount || 0);
     });
 
   const totalAllExpenses = Object.values(categorySpendingMap).reduce((a, b) => a + b, 0);
@@ -285,7 +291,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 4. 請求ステータス変更（完全な巻き戻し対応）
+  // 4. 現金/振込による請求決済・未納リセット（相殺ログがある場合は警告）
   const executePaymentStatusChange = async () => {
     if (!confirmPaymentTarget) return;
     setIsSubmitting(true);
@@ -295,7 +301,6 @@ export default function Home() {
     const isClearing = confirmPaymentTarget.status !== '支払済';
 
     if (isClearing) {
-      // 完済にする
       await supabase
         .from('payments')
         .update({
@@ -305,21 +310,13 @@ export default function Home() {
         })
         .eq('id', confirmPaymentTarget.id);
     } else {
-      // 未納へ戻す場合: 相殺されていた相手の立替を完全巻き戻し
-      const linkedExpense = expenses.find(
-        (e) => e.offset_payment_id === confirmPaymentTarget.id || e.id === confirmPaymentTarget.offset_expense_id
-      );
-
-      if (linkedExpense) {
-        await supabase
-          .from('expenses')
-          .update({
-            status: '未精算',
-            settled_amount: 0,
-            offset_payment_id: null,
-            reject_reason: '',
-          })
-          .eq('id', linkedExpense.id);
+      // 未納へ戻す
+      const linkedOffsets = offsetTransactions.filter((o) => o.payment_id === confirmPaymentTarget.id);
+      if (linkedOffsets.length > 0) {
+        alert('この請求には相殺履歴があります。「相殺履歴」ボタンから相殺を取り消してください。');
+        setConfirmPaymentTarget(null);
+        setIsSubmitting(false);
+        return;
       }
 
       await supabase
@@ -328,7 +325,6 @@ export default function Home() {
           status: '未納',
           paid_amount: 0,
           payment_method: '現金/振込',
-          offset_expense_id: null,
         })
         .eq('id', confirmPaymentTarget.id);
     }
@@ -338,7 +334,7 @@ export default function Home() {
     fetchData();
   };
 
-  // 5. 【パターンA】立替レコードを分割しない完全非破壊相殺
+  // 5. 【相殺ログ方式】相殺の実行
   const handleExecuteOffset = async () => {
     if (!selectedExpenseForOffset || !targetPaymentIdForOffset) return;
     setIsSubmitting(true);
@@ -355,67 +351,107 @@ export default function Home() {
     const currentSettled = selectedExpenseForOffset.settled_amount || 0;
     const availableExpense = selectedExpenseForOffset.amount - currentSettled;
 
-    if (availableExpense >= remainingToPay) {
-      // 請求を完済。立替は remainingToPay だけ充当
-      const newSettled = currentSettled + remainingToPay;
-      const isExpenseFullySettled = newSettled >= selectedExpenseForOffset.amount;
+    const offsetAmount = offsetCustomAmount ? parseInt(offsetCustomAmount, 10) : Math.min(remainingToPay, availableExpense);
 
-      await supabase
-        .from('payments')
-        .update({
-          status: '支払済',
-          paid_amount: targetEvent.amount,
-          payment_method: '相殺',
-          offset_expense_id: selectedExpenseForOffset.id,
-        })
-        .eq('id', targetPayment.id);
-
-      await supabase
-        .from('expenses')
-        .update({
-          status: isExpenseFullySettled ? '精算済' : '一部精算',
-          settled_amount: newSettled,
-          offset_payment_id: targetPayment.id,
-          reject_reason: `相殺: ${targetEvent.title} (充当 ¥${remainingToPay.toLocaleString()})`,
-        })
-        .eq('id', selectedExpenseForOffset.id);
-
-      alert('相殺しました');
-    } else {
-      // 立替を全額充当し、請求は一部納入
-      const newPaid = currentPaid + availableExpense;
-
-      await supabase
-        .from('payments')
-        .update({
-          status: '一部納入',
-          paid_amount: newPaid,
-          payment_method: `相殺 (${selectedExpenseForOffset.title})`,
-          offset_expense_id: selectedExpenseForOffset.id,
-        })
-        .eq('id', targetPayment.id);
-
-      await supabase
-        .from('expenses')
-        .update({
-          status: '精算済',
-          settled_amount: selectedExpenseForOffset.amount,
-          offset_payment_id: targetPayment.id,
-          reject_reason: `相殺: ${targetEvent.title} (充当 ¥${availableExpense.toLocaleString()})`,
-        })
-        .eq('id', selectedExpenseForOffset.id);
-
-      alert(`相殺しました（残額: ¥${(targetEvent.amount - newPaid).toLocaleString()}）`);
+    if (isNaN(offsetAmount) || offsetAmount <= 0 || offsetAmount > remainingToPay || offsetAmount > availableExpense) {
+      alert('相殺金額が不正です');
+      setIsSubmitting(false);
+      return;
     }
 
+    // 1. 相殺トランザクションを記録
+    const { error: offsetError } = await supabase.from('offset_transactions').insert({
+      member_id: selectedExpenseForOffset.member_id,
+      payment_id: targetPayment.id,
+      expense_id: selectedExpenseForOffset.id,
+      amount: offsetAmount,
+    });
+
+    if (offsetError) {
+      alert('相殺の記録に失敗しました');
+      setIsSubmitting(false);
+      return;
+    }
+
+    // 2. 請求レコードを更新
+    const nextPaidAmount = currentPaid + offsetAmount;
+    const nextPaymentStatus = nextPaidAmount >= targetEvent.amount ? '支払済' : '一部納入';
+    await supabase
+      .from('payments')
+      .update({
+        status: nextPaymentStatus,
+        paid_amount: nextPaidAmount,
+        payment_method: nextPaymentStatus === '支払済' ? '相殺' : `一部相殺`,
+      })
+      .eq('id', targetPayment.id);
+
+    // 3. 立替レコードを更新
+    const nextSettledAmount = currentSettled + offsetAmount;
+    const nextExpenseStatus = nextSettledAmount >= selectedExpenseForOffset.amount ? '精算済' : '一部精算';
+    await supabase
+      .from('expenses')
+      .update({
+        status: nextExpenseStatus,
+        settled_amount: nextSettledAmount,
+      })
+      .eq('id', selectedExpenseForOffset.id);
+
+    alert(`¥${offsetAmount.toLocaleString()} を相殺しました`);
     setShowOffsetModal(false);
     setSelectedExpenseForOffset(null);
     setTargetPaymentIdForOffset('');
+    setOffsetCustomAmount('');
     setIsSubmitting(false);
     fetchData();
   };
 
-  // 6. 現金精算
+  // 6. 【相殺ログ方式】相殺ログの取消（完全巻き戻し）
+  const handleCancelOffsetTransaction = async (offsetTx: OffsetTransaction) => {
+    if (!confirm(`¥${offsetTx.amount.toLocaleString()} の相殺を取り消しますか？\n（部費と立替の双方が元の残高へ戻ります）`)) {
+      return;
+    }
+    setIsSubmitting(true);
+
+    const payment = payments.find((p) => p.id === offsetTx.payment_id);
+    const expense = expenses.find((e) => e.id === offsetTx.expense_id);
+    const event = events.find((e) => e.id === payment?.billing_event_id);
+
+    // 1. 請求側の巻き戻し
+    if (payment && event) {
+      const revertedPaid = Math.max(0, (payment.paid_amount || 0) - offsetTx.amount);
+      const nextStatus = revertedPaid === 0 ? '未納' : revertedPaid >= event.amount ? '支払済' : '一部納入';
+      await supabase
+        .from('payments')
+        .update({
+          status: nextStatus,
+          paid_amount: revertedPaid,
+          payment_method: nextStatus === '未納' ? '現金/振込' : payment.payment_method,
+        })
+        .eq('id', payment.id);
+    }
+
+    // 2. 立替側の巻き戻し
+    if (expense) {
+      const revertedSettled = Math.max(0, (expense.settled_amount || 0) - offsetTx.amount);
+      const nextStatus = revertedSettled === 0 ? '未精算' : revertedSettled >= expense.amount ? '精算済' : '一部精算';
+      await supabase
+        .from('expenses')
+        .update({
+          status: nextStatus,
+          settled_amount: revertedSettled,
+        })
+        .eq('id', expense.id);
+    }
+
+    // 3. ログを物理削除
+    await supabase.from('offset_transactions').delete().eq('id', offsetTx.id);
+
+    alert('相殺を取り消しました');
+    setIsSubmitting(false);
+    fetchData();
+  };
+
+  // 7. 現金精算
   const handleCashSettle = async (expense: Expense) => {
     if (!confirm(`「${expense.title}」を現金精算済にしますか？`)) return;
     await supabase
@@ -429,34 +465,26 @@ export default function Home() {
     fetchData();
   };
 
-  // 7. 立替削除
+  // 8. 立替削除
   const handleDeleteExpense = async (expense: Expense) => {
+    if ((expense.settled_amount || 0) > 0) {
+      alert('相殺履歴のある立替は削除できません。先に相殺を取り消してください。');
+      return;
+    }
     if (!confirm(`「${expense.title}」を削除しますか？`)) return;
     await supabase.from('expenses').delete().eq('id', expense.id);
     fetchData();
   };
 
-  // 8. 立替取消（双方向完全巻き戻し）
+  // 9. 立替の直接取消（現金精算した場合のみ）
   const handleRevertExpense = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」を未精算に戻しますか？\n（相殺されていた請求も未納に戻ります）`)) {
+    const linkedOffsets = offsetTransactions.filter((o) => o.expense_id === expense.id);
+    if (linkedOffsets.length > 0) {
+      alert('この立替には相殺履歴があります。「相殺履歴」ボタンから該当の相殺を取り消してください。');
       return;
     }
 
-    const linkedPayment = payments.find(
-      (p) => p.id === expense.offset_payment_id || p.offset_expense_id === expense.id
-    );
-
-    if (linkedPayment) {
-      await supabase
-        .from('payments')
-        .update({
-          status: '未納',
-          paid_amount: 0,
-          payment_method: '現金/振込',
-          offset_expense_id: null,
-        })
-        .eq('id', linkedPayment.id);
-    }
+    if (!confirm(`「${expense.title}」を未精算に戻しますか？`)) return;
 
     await supabase
       .from('expenses')
@@ -464,7 +492,6 @@ export default function Home() {
         status: '未精算',
         settled_amount: 0,
         reject_reason: '',
-        offset_payment_id: null,
       })
       .eq('id', expense.id);
 
@@ -548,12 +575,20 @@ export default function Home() {
             <h1 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
               <span>⛵</span> ヨット部 会計
             </h1>
-            <button
-              onClick={exportToCSV}
-              className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700 font-bold transition"
-            >
-              CSV出力
-            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setShowOffsetHistoryModal(true)}
+                className="text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-lg font-bold transition"
+              >
+                相殺履歴
+              </button>
+              <button
+                onClick={exportToCSV}
+                className="text-xs bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg text-slate-700 font-bold transition"
+              >
+                CSV
+              </button>
+            </div>
           </div>
 
           <div className="flex items-center gap-2">
@@ -775,9 +810,9 @@ export default function Home() {
                         .map((e) => {
                           const member = members.find((m) => m.id === e.member_id);
                           const memberUnpaid = payments.filter((p) => p.member_id === e.member_id && p.status !== '支払済');
-                          const canOffset = memberUnpaid.length > 0;
                           const currentSettled = e.settled_amount || 0;
                           const remainingExpense = Math.max(0, e.amount - currentSettled);
+                          const canOffset = memberUnpaid.length > 0 && remainingExpense > 0;
 
                           return (
                             <div key={e.id} className="p-3 border border-slate-100 rounded-xl bg-slate-50 space-y-2.5">
@@ -845,6 +880,7 @@ export default function Home() {
                                       if (!canOffset) return;
                                       setSelectedExpenseForOffset(e);
                                       setTargetPaymentIdForOffset(memberUnpaid[0].id);
+                                      setOffsetCustomAmount('');
                                       setShowOffsetModal(true);
                                     }}
                                     disabled={!canOffset}
@@ -873,7 +909,7 @@ export default function Home() {
                                 </div>
                               )}
 
-                              {e.status !== '未精算' && (
+                              {e.status === '精算済' && (
                                 <div className="flex justify-end pt-1">
                                   <button
                                     onClick={() => handleRevertExpense(e)}
@@ -897,19 +933,19 @@ export default function Home() {
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                   <div className="md:col-span-2 bg-slate-900 text-white p-5 rounded-3xl shadow-lg space-y-3">
-                    <span className="text-xs text-slate-400">部の資金残高</span>
+                    <span className="text-xs text-slate-400">部の手元資金（部口座＋現金）</span>
                     <div className="text-3xl sm:text-4xl font-black tabular-nums">
                       ¥{estimatedClubTreasury.toLocaleString()}
                     </div>
                     <div className="grid grid-cols-2 gap-2 pt-3 border-t border-slate-800 text-xs">
                       <div>
-                        <span className="text-slate-400 text-[10px] block">総入金</span>
+                        <span className="text-slate-400 text-[10px] block">現金の総入金（部費+寄付）</span>
                         <span className="font-bold text-emerald-400 tabular-nums">
                           +¥{(totalCollectedDues + totalClubDonations).toLocaleString()}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-400 text-[10px] block">総支出</span>
+                        <span className="text-slate-400 text-[10px] block">現金の総出金（部支出+精算）</span>
                         <span className="font-bold text-rose-400 tabular-nums">
                           -¥{(totalDirectClubExpenses + totalReimbursedExpenses).toLocaleString()}
                         </span>
@@ -986,7 +1022,7 @@ export default function Home() {
                         ))}
 
                       {expenses
-                        .filter((e) => e.status === '精算済')
+                        .filter((e) => (e.settled_amount || 0) > 0)
                         .map((e) => {
                           const mem = members.find((m) => m.id === e.member_id);
                           return (
@@ -994,7 +1030,7 @@ export default function Home() {
                               <div>
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-[9px] bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded font-bold">
-                                    立替精算
+                                    立替充当・精算
                                   </span>
                                   <span className="text-xs font-bold text-slate-800">{e.title}</span>
                                 </div>
@@ -1003,7 +1039,7 @@ export default function Home() {
                                 </p>
                               </div>
                               <span className="text-xs font-black tabular-nums text-slate-800">
-                                -¥{e.amount.toLocaleString()}
+                                -¥{(e.settled_amount || 0).toLocaleString()}
                               </span>
                             </div>
                           );
@@ -1110,6 +1146,59 @@ export default function Home() {
           </button>
         </div>
       </nav>
+
+      {/* モーダル: 相殺履歴一覧（完全な取消が可能） */}
+      {showOffsetHistoryModal && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-3xl p-5 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
+            <div className="flex justify-between items-center border-b pb-3">
+              <h3 className="font-black text-base text-slate-800">相殺履歴一覧</h3>
+              <button onClick={() => setShowOffsetHistoryModal(false)} className="text-slate-400 font-bold text-lg">
+                ✕
+              </button>
+            </div>
+
+            {offsetTransactions.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-6">相殺履歴はありません</p>
+            ) : (
+              <div className="space-y-2">
+                {offsetTransactions
+                  .filter((o) => !currentMember || o.member_id === currentMember.id)
+                  .map((o) => {
+                    const member = members.find((m) => m.id === o.member_id);
+                    const payment = payments.find((p) => p.id === o.payment_id);
+                    const event = events.find((e) => e.id === payment?.billing_event_id);
+                    const expense = expenses.find((e) => e.id === o.expense_id);
+
+                    return (
+                      <div key={o.id} className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs flex justify-between items-center">
+                        <div className="space-y-0.5">
+                          <p className="font-bold text-slate-800">{member?.name} | ¥{o.amount.toLocaleString()}</p>
+                          <p className="text-[10px] text-slate-500">部費: {event?.title}</p>
+                          <p className="text-[10px] text-slate-500">立替: {expense?.title}</p>
+                        </div>
+                        <button
+                          onClick={() => handleCancelOffsetTransaction(o)}
+                          disabled={isSubmitting}
+                          className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-lg transition"
+                        >
+                          取消
+                        </button>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+
+            <button
+              onClick={() => setShowOffsetHistoryModal(false)}
+              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs rounded-xl"
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* モーダル: 納入確認 */}
       {confirmPaymentTarget && (
@@ -1554,29 +1643,16 @@ export default function Home() {
               </select>
             </div>
 
-            {/* 結果プレビュー */}
-            {(() => {
-              const targetP = payments.find((p) => p.id === targetPaymentIdForOffset);
-              const targetE = events.find((e) => e.id === targetP?.billing_event_id);
-              if (!targetE) return null;
-              const remainingToPay = targetE.amount - (targetP?.paid_amount || 0);
-              const availableExpense = selectedExpenseForOffset.amount - (selectedExpenseForOffset.settled_amount || 0);
-              const diff = availableExpense - remainingToPay;
-
-              return (
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs space-y-1">
-                  <p className="font-bold text-slate-700">結果:</p>
-                  {diff >= 0 ? (
-                    <>
-                      <p className="text-green-600 font-bold">・請求: 完済</p>
-                      {diff > 0 && <p className="text-blue-700 font-bold">・立替残額: ¥{diff.toLocaleString()}</p>}
-                    </>
-                  ) : (
-                    <p className="text-amber-700 font-bold">・請求残額: ¥{Math.abs(diff).toLocaleString()}</p>
-                  )}
-                </div>
-              );
-            })()}
+            <div>
+              <label className="text-xs text-slate-600 font-medium">相殺金額 (未入力で最大額)</label>
+              <input
+                type="number"
+                placeholder="例: 3000"
+                value={offsetCustomAmount}
+                onChange={(e) => setOffsetCustomAmount(e.target.value)}
+                className="w-full mt-1 p-2 border border-slate-200 rounded-xl text-xs font-semibold"
+              />
+            </div>
 
             <div className="flex gap-2 pt-2">
               <button type="button" onClick={() => setShowOffsetModal(false)} className="flex-1 py-2.5 text-xs border rounded-xl">
