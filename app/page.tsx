@@ -106,7 +106,7 @@ export default function Home() {
       setEvents(data.events.sort(newest));
       setClubTransactions(data.clubTransactions.sort(newest));
       setOffsetTransactions(data.offsetTransactions.sort(newest));
-      setSelectedMemberId(current => data.members.some(member => member.id === current) ? current : '');
+      setSelectedMemberId(current => data.members.some(member => member.id === current && member.is_active !== false) ? current : '');
       setDataError(null);
     } catch (error) {
       if (version === loadVersionRef.current) setDataError(errorMessage(error));
@@ -503,7 +503,7 @@ export default function Home() {
               className="w-full md:w-64 p-2.5 border border-slate-300 rounded-xl bg-white text-sm font-bold text-slate-800 shadow-sm"
             >
               <option value="">-- 全体 --</option>
-              {members.map((m) => (
+              {activeMembers.map((m) => (
                 <option key={m.id} value={m.id}>
                   {m.is_active === false ? '退部' : `${m.grade}年`} {m.name} ({m.role})
                 </option>
@@ -885,7 +885,7 @@ export default function Home() {
               <div className="space-y-3">
                 <p className="text-sm text-slate-500">部員を選択すると個別の履歴を確認できます</p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {members.map((m) => {
+                  {activeMembers.map((m) => {
                     const unpaid = getUnpaidTotal(m.id);
                     const unreimbursed = getUnreimbursedTotal(m.id);
                     const canOffset = unpaid > 0 && unreimbursed > 0;
