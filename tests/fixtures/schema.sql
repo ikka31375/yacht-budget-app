@@ -1,0 +1,11 @@
+create role anon;
+create role authenticated;
+create table public.members(id uuid primary key default gen_random_uuid(), name text not null, grade integer not null, role text default '部員', created_at timestamptz default now(), deposit_balance integer not null default 0);
+create table public.billing_events(id uuid primary key default gen_random_uuid(), title text not null, amount integer not null, due_date date not null, type text not null, created_at timestamptz default now());
+create table public.payments(id uuid primary key default gen_random_uuid(), billing_event_id uuid references public.billing_events(id) on delete cascade, member_id uuid references public.members(id) on delete cascade, status text default '未納', paid_at timestamptz, created_at timestamptz default now(), paid_amount integer not null default 0, payment_method text default '現金/振込');
+create table public.expenses(id uuid primary key default gen_random_uuid(), member_id uuid references public.members(id) on delete set null, title text not null, amount integer not null, category text not null, receipt_url text, status text default '未精算', settled_amount integer default 0, reject_reason text default '', created_at timestamptz default now(), offset_payment_id uuid references public.payments(id) on delete set null);
+alter table public.payments add column offset_expense_id uuid references public.expenses(id) on delete set null;
+create table public.club_transactions(id uuid primary key default gen_random_uuid(), type text not null check(type in ('支出','収入')), title text not null, amount integer not null check(amount >= 0), category text not null, payment_source text not null default '部口座振込' check(payment_source in ('部口座振込','部室現金')), event_tag text default '', receipt_url text, created_at timestamptz not null default now());
+create table public.offset_transactions(id uuid primary key default gen_random_uuid(), member_id uuid not null references public.members(id) on delete cascade, payment_id uuid not null references public.payments(id) on delete cascade, expense_id uuid not null references public.expenses(id) on delete cascade, amount integer not null check(amount > 0), created_at timestamptz default now());
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on all tables in schema public to anon, authenticated;

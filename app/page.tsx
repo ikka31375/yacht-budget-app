@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useCallback, useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Member, Payment, Expense, BillingEvent, ClubTransaction, OffsetTransaction } from '@/types';
+import { calculateAccounting, createCsv, errorMessage, japanDate, MAX_AMOUNT, parseAmount } from '@/lib/accounting';
+import { fetchClubData, saveClubOperation } from '@/lib/data';
 
 // 洗練された大分類カテゴリ（固定）
 const EXPENSE_CATEGORIES = [
@@ -29,6 +31,7 @@ export default function Home() {
   const [clubTransactions, setClubTransactions] = useState<ClubTransaction[]>([]);
   const [offsetTransactions, setOffsetTransactions] = useState<OffsetTransaction[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
+  const [dataError, setDataError] = useState<string | null>(null);
 
   // フィルター
   const [paymentFilter, setPaymentFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
@@ -62,6 +65,8 @@ export default function Home() {
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [localReceiptPreview, setLocalReceiptPreview] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [receiptTarget, setReceiptTarget] = useState<Expense | null>(null);
+  const uploadedReceiptRef = useRef<{ file: File; url: string } | null>(null);
 
   // フォーム: 部費出納
   const [txType, setTxType] = useState<'支出' | '収入'>('支出');
@@ -77,37 +82,50 @@ export default function Home() {
   const [offsetCustomAmount, setOffsetCustomAmount] = useState<string>('');
 
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const loadVersionRef = useRef(0);
+  const creationIdsRef = useRef<Record<string, string>>({});
 
-  useEffect(() => {
-    fetchData();
-    const saved = localStorage.getItem('selectedMemberId');
-    if (saved) setSelectedMemberId(saved);
+  const fetchData = useCallback(async () => {
+    const version = ++loadVersionRef.current;
+    setLoading(true);
+    try {
+      const data = await fetchClubData();
+      if (version !== loadVersionRef.current) return;
+      setMembers(data.members.sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, 'ja')));
+      setPayments(data.payments);
+      const newest = (a: { created_at?: string }, b: { created_at?: string }) => (b.created_at || '').localeCompare(a.created_at || '');
+      setExpenses(data.expenses.sort(newest));
+      setEvents(data.events.sort(newest));
+      setClubTransactions(data.clubTransactions.sort(newest));
+      setOffsetTransactions(data.offsetTransactions.sort(newest));
+      setSelectedMemberId(current => data.members.some(member => member.id === current) ? current : '');
+      setDataError(null);
+    } catch (error) {
+      if (version === loadVersionRef.current) setDataError(errorMessage(error));
+    } finally {
+      if (version === loadVersionRef.current) setLoading(false);
+    }
   }, []);
 
-  const fetchData = async () => {
-    setLoading(true);
-    const { data: mData } = await supabase.from('members').select('*').order('grade', { ascending: true });
-    const { data: pData } = await supabase.from('payments').select('*');
-    const { data: eData } = await supabase.from('expenses').select('*').order('created_at', { ascending: false });
-    const { data: bData } = await supabase.from('billing_events').select('*').order('created_at', { ascending: false });
-    const { data: cData } = await supabase.from('club_transactions').select('*').order('created_at', { ascending: false });
-    const { data: oData } = await supabase.from('offset_transactions').select('*').order('created_at', { ascending: false });
+  useEffect(() => {
+    let active = true;
+    const versionRef = loadVersionRef;
+    void Promise.resolve().then(async () => {
+      if (!active) return;
+      try { setSelectedMemberId(localStorage.getItem('selectedMemberId') || ''); } catch { /* Storage may be disabled. */ }
+      await fetchData();
+    });
+    return () => { active = false; versionRef.current++; };
+  }, [fetchData]);
 
-    if (mData) {
-      setMembers(mData);
-      if (targetMemberIds.length === 0) setTargetMemberIds(mData.map((m) => m.id));
-    }
-    if (pData) setPayments(pData);
-    if (eData) setExpenses(eData);
-    if (bData) setEvents(bData);
-    if (cData) setClubTransactions(cData);
-    if (oData) setOffsetTransactions(oData);
-    setLoading(false);
-  };
+  useEffect(() => {
+    return () => { if (localReceiptPreview) URL.revokeObjectURL(localReceiptPreview); };
+  }, [localReceiptPreview]);
 
   const handleMemberChange = (id: string) => {
     setSelectedMemberId(id);
-    localStorage.setItem('selectedMemberId', id);
+    try { localStorage.setItem('selectedMemberId', id); } catch { /* Selection still works without storage. */ }
   };
 
   const currentMember = members.find((m) => m.id === selectedMemberId);
@@ -134,95 +152,85 @@ export default function Home() {
       }, 0);
   };
 
-  // 全体会計残高計算
-  const totalOffsetAmount = offsetTransactions.reduce((sum, o) => sum + o.amount, 0);
+  const accounting = calculateAccounting({ members, payments, expenses, events, clubTransactions, offsetTransactions });
+  const { categorySpendingMap, categoryIncomeMap, totalAllExpenses, totalAllIncomes, estimatedClubTreasury } = accounting;
+  const actionsDisabled = loading || isSubmitting || !!dataError || accounting.issues.length > 0;
 
-  const totalCollectedDues = payments
-    .reduce((sum, p) => sum + (p.paid_amount || 0), 0) - totalOffsetAmount;
-
-  const totalClubDonations = clubTransactions
-    .filter((t) => t.type === '収入')
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const totalDirectClubExpenses = clubTransactions
-    .filter((t) => t.type === '支出')
-    .reduce((sum, t) => sum + t.amount, 0);
-
-  const totalReimbursedExpenses = expenses
-    .reduce((sum, e) => sum + (e.settled_amount || 0), 0) - totalOffsetAmount;
-
-  const estimatedClubTreasury =
-    totalCollectedDues + totalClubDonations - totalDirectClubExpenses - totalReimbursedExpenses;
-
-  // 支出カテゴリ別集計
-  const categorySpendingMap: { [cat: string]: number } = {};
-  clubTransactions
-    .filter((t) => t.type === '支出')
-    .forEach((t) => {
-      categorySpendingMap[t.category] = (categorySpendingMap[t.category] || 0) + t.amount;
-    });
-  expenses
-    .filter((e) => (e.settled_amount || 0) > 0)
-    .forEach((e) => {
-      categorySpendingMap[e.category] = (categorySpendingMap[e.category] || 0) + (e.settled_amount || 0);
-    });
-  const totalAllExpenses = Object.values(categorySpendingMap).reduce((a, b) => a + b, 0);
-
-  // 収入カテゴリ別集計
-  const categoryIncomeMap: { [cat: string]: number } = {};
-  categoryIncomeMap['部費納入 (現金/振込)'] = totalCollectedDues;
-  clubTransactions
-    .filter((t) => t.type === '収入')
-    .forEach((t) => {
-      categoryIncomeMap[t.category] = (categoryIncomeMap[t.category] || 0) + t.amount;
-    });
-  const totalAllIncomes = Object.values(categoryIncomeMap).reduce((a, b) => a + b, 0);
-
-  // 画像圧縮
-  const compressImage = (file: File): Promise<Blob> => {
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.src = URL.createObjectURL(file);
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const maxSide = 1200;
-        let width = img.width;
-        let height = img.height;
-        if (width > height && width > maxSide) {
-          height = Math.round((height * maxSide) / width);
-          width = maxSide;
-        } else if (height > maxSide) {
-          width = Math.round((width * maxSide) / height);
-          height = maxSide;
-        }
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        ctx?.drawImage(img, 0, 0, width, height);
-        canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('圧縮失敗'))), 'image/jpeg', 0.8);
-      };
-      img.onerror = (err) => reject(err);
-    });
+  const runOperation = async (action: () => Promise<void>) => {
+    if (submittingRef.current || loading || dataError || accounting.issues.length > 0) return;
+    submittingRef.current = true;
+    setIsSubmitting(true);
+    try {
+      await action();
+      await fetchData();
+    } catch (error) {
+      alert(errorMessage(error));
+    } finally {
+      submittingRef.current = false;
+      setIsSubmitting(false);
+    }
   };
+
+  const creationId = (operation: string) => {
+    creationIdsRef.current[operation] ||= crypto.randomUUID();
+    return creationIdsRef.current[operation];
+  };
+
+  // Revoke temporary image URLs on every success/error path.
+  const compressImage = (file: File): Promise<Blob> => new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      try {
+        const scale = Math.min(1, 1200 / Math.max(img.width, img.height));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('画像を処理できませんでした。');
+        context.drawImage(img, 0, 0, canvas.width, canvas.height);
+        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('画像を圧縮できませんでした。')), 'image/jpeg', 0.8);
+      } catch (error) { reject(error); }
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('写真を読み込めませんでした。別の写真を選択してください。')); };
+    img.src = url;
+  });
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (!file.type.startsWith('image/')) { alert('画像ファイルを選択してください。'); return; }
       setReceiptFile(file);
       setLocalReceiptPreview(URL.createObjectURL(file));
+      uploadedReceiptRef.current = null;
     }
   };
 
   const clearSelectedFile = () => {
     setReceiptFile(null);
     setLocalReceiptPreview(null);
+    uploadedReceiptRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const uploadReceipt = async (file: File) => {
+    if (uploadedReceiptRef.current?.file === file) return uploadedReceiptRef.current.url;
+    const blob = await compressImage(file);
+    const name = `${crypto.randomUUID()}.jpg`;
+    const { error } = await supabase.storage.from('receipts').upload(name, blob, { contentType: 'image/jpeg', upsert: false });
+    if (error) throw new Error(`写真の保存に失敗しました。申請は確定していません。写真と入力を残していますので再試行してください。\n${errorMessage(error)}`);
+    const { data } = supabase.storage.from('receipts').getPublicUrl(name);
+    uploadedReceiptRef.current = { file, url: data.publicUrl };
+    return data.publicUrl;
   };
 
   // 相殺モーダルを開く際の自動MAX計算
   const openOffsetModalForExpense = (expense: Expense) => {
     setSelectedExpenseForOffset(expense);
     const memberUnpaid = payments.filter((p) => p.member_id === expense.member_id && p.status !== '支払済');
+    setTargetPaymentIdForOffset('');
+    setOffsetCustomAmount('');
     if (memberUnpaid.length > 0) {
       const firstTarget = memberUnpaid[0];
       setTargetPaymentIdForOffset(firstTarget.id);
@@ -248,386 +256,120 @@ export default function Home() {
     }
   };
 
-  // 1. 請求作成
   const handleCreateBillingEvent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!eventTitle || !eventAmount || targetMemberIds.length === 0) {
-      alert('請求名、金額、対象部員を入力してください');
-      return;
-    }
-    setIsSubmitting(true);
-
-    const { data: eventData, error: evError } = await supabase
-      .from('billing_events')
-      .insert({
-        title: eventTitle,
-        amount: parseInt(eventAmount, 10),
-        due_date: eventDueDate || new Date().toISOString().split('T')[0],
-        type: '部費・遠征費',
-      })
-      .select()
-      .single();
-
-    if (evError || !eventData) {
-      alert('作成に失敗しました');
-      setIsSubmitting(false);
-      return;
-    }
-
-    const paymentRecords = targetMemberIds.map((mId) => ({
-      billing_event_id: eventData.id,
-      member_id: mId,
-      status: '未納',
-      paid_amount: 0,
-      payment_method: '現金/振込',
-    }));
-
-    await supabase.from('payments').insert(paymentRecords);
-
-    setEventTitle('');
-    setEventAmount('');
-    setEventDueDate('');
-    setShowEventModal(false);
-    setIsSubmitting(false);
-    fetchData();
+    await runOperation(async () => {
+      const amount = parseAmount(eventAmount);
+      if (!eventTitle.trim() || targetMemberIds.length === 0) throw new Error('請求名と対象部員を入力してください。');
+      await saveClubOperation('create_billing', {
+        id: creationId('billing'), title: eventTitle.trim(), amount,
+        due_date: eventDueDate || japanDate(), member_ids: targetMemberIds,
+      });
+      delete creationIdsRef.current.billing;
+      setEventTitle(''); setEventAmount(''); setEventDueDate(''); setShowEventModal(false);
+    });
   };
 
-  // 請求イベント丸ごと削除
   const handleDeleteBillingEvent = async (event: BillingEvent) => {
-    const eventPayments = payments.filter((p) => p.billing_event_id === event.id);
-    const paidRecords = eventPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0);
-    const isUsedInOffset = offsetTransactions.some((o) => eventPayments.some((p) => p.id === o.payment_id));
-
-    if (paidRecords.length > 0 || isUsedInOffset) {
-      const paidMemberNames = paidRecords
-        .map((p) => members.find((m) => m.id === p.member_id)?.name)
-        .filter(Boolean)
-        .join('、');
-
-      alert(
-        `この請求は削除できません。\n既に納入または相殺を行っている部員（${paidMemberNames || '相殺履歴あり'}）がいます。\n先に「相殺履歴」の取消や「未納に戻す」操作を行ってください。`
-      );
-      return;
-    }
-
-    if (!confirm(`請求「${event.title}」(¥${event.amount.toLocaleString()}) を完全に削除しますか？\n（対象部員の請求レコードも一括削除されます）`)) {
-      return;
-    }
-
-    setIsSubmitting(true);
-    await supabase.from('payments').delete().eq('billing_event_id', event.id);
-    await supabase.from('billing_events').delete().eq('id', event.id);
-
-    alert(`請求「${event.title}」を削除しました`);
-    setIsSubmitting(false);
-    fetchData();
+    if (!confirm(`請求「${event.title}」を削除しますか？納入・相殺がある請求は削除できません。`)) return;
+    await runOperation(() => saveClubOperation('delete_billing', { id: event.id }));
   };
 
-  // 特定部員の請求個別除外
   const handleDeleteIndividualPayment = async (payment: Payment) => {
-    if (payment.status !== '未納' || (payment.paid_amount || 0) > 0) {
-      alert('納入済または相殺済みの請求は除外できません。未納に戻してから操作してください。');
-      return;
-    }
-
-    const ev = events.find((e) => e.id === payment.billing_event_id);
-    const mem = members.find((m) => m.id === payment.member_id);
-
-    if (!confirm(`${mem?.name} さんの「${ev?.title}」請求を除外（削除）しますか？`)) {
-      return;
-    }
-
-    await supabase.from('payments').delete().eq('id', payment.id);
-    fetchData();
+    const event = events.find(e => e.id === payment.billing_event_id);
+    const member = members.find(m => m.id === payment.member_id);
+    if (!confirm(`${member?.name} さんの「${event?.title}」を請求対象から除外しますか？`)) return;
+    await runOperation(() => saveClubOperation('delete_payment', { id: payment.id }));
   };
 
-  // 2. 個人立替申請（画像保存）
   const handleCreateExpense = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedMemberId) {
-      alert('部員を選択してください');
-      return;
-    }
-    if (!expenseTitle || !expenseAmount) return;
-
-    setIsSubmitting(true);
-    let receiptUrl = '';
-
-    if (receiptFile) {
-      try {
-        const compressedBlob = await compressImage(receiptFile);
-        const fileName = `${Date.now()}_${Math.random().toString(36).substring(7)}.jpg`;
-        const { error: uploadError } = await supabase.storage
-          .from('receipts')
-          .upload(fileName, compressedBlob, {
-            contentType: 'image/jpeg',
-            cacheControl: '3600',
-            upsert: false,
-          });
-
-        if (uploadError) {
-          console.error('Storageアップロードエラー詳細:', uploadError);
-          alert(`画像の保存に失敗しました: ${uploadError.message}\n（文字のみで申請を続行します）`);
-        } else {
-          const { data: publicUrlData } = supabase.storage.from('receipts').getPublicUrl(fileName);
-          receiptUrl = publicUrlData.publicUrl;
-        }
-      } catch (err: any) {
-        console.error('画像圧縮またはアップロード例外:', err);
-        alert(`画像処理中にエラーが発生しました: ${err.message || err}`);
+    await runOperation(async () => {
+      // Validate before uploading; keep the uploaded URL when only the database save fails.
+      const amount = receiptTarget ? receiptTarget.amount : parseAmount(expenseAmount);
+      if (!receiptTarget && (!selectedMemberId || !expenseTitle.trim())) throw new Error('部員と用途・品名を入力してください。');
+      if (receiptTarget && !receiptFile) throw new Error('添付する写真を選択してください。');
+      const receiptUrl = receiptFile ? await uploadReceipt(receiptFile) : '';
+      if (receiptTarget) {
+        await saveClubOperation('attach_receipt', { id: receiptTarget.id, receipt_url: receiptUrl, expected_receipt_url: receiptTarget.receipt_url || '' });
+      } else {
+        await saveClubOperation('create_expense', {
+          id: creationId('expense'), member_id: selectedMemberId, title: expenseTitle.trim(),
+          amount, category: expenseCategory, receipt_url: receiptUrl,
+        });
+        delete creationIdsRef.current.expense;
       }
-    }
-
-    const { error: insertError } = await supabase.from('expenses').insert({
-      member_id: selectedMemberId,
-      title: expenseTitle,
-      amount: parseInt(expenseAmount, 10),
-      category: expenseCategory,
-      receipt_url: receiptUrl,
-      status: '未精算',
-      settled_amount: 0,
+      setExpenseTitle(''); setExpenseAmount(''); clearSelectedFile();
+      setReceiptTarget(null); setShowExpenseModal(false);
     });
-
-    if (insertError) {
-      alert(`申請の保存に失敗しました: ${insertError.message}`);
-      setIsSubmitting(false);
-      return;
-    }
-
-    setExpenseTitle('');
-    setExpenseAmount('');
-    clearSelectedFile();
-    setShowExpenseModal(false);
-    setIsSubmitting(false);
-    fetchData();
   };
 
-  // 3. 部費出納登録
   const handleCreateClubTransaction = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!txTitle || !txAmount) return;
-    setIsSubmitting(true);
-
-    await supabase.from('club_transactions').insert({
-      type: txType,
-      title: txTitle,
-      amount: parseInt(txAmount, 10),
-      category: txCategory,
-      payment_source: txSource,
-      event_tag: txEventTag || null,
+    await runOperation(async () => {
+      const amount = parseAmount(txAmount);
+      if (!txTitle.trim()) throw new Error('品名・内容を入力してください。');
+      await saveClubOperation('create_club_transaction', {
+        id: creationId('club'), type: txType, title: txTitle.trim(), amount,
+        category: txCategory, payment_source: txSource, event_tag: txEventTag.trim() || null,
+      });
+      delete creationIdsRef.current.club;
+      setTxTitle(''); setTxAmount(''); setTxEventTag(''); setShowClubTxModal(false);
     });
-
-    setTxTitle('');
-    setTxAmount('');
-    setTxEventTag('');
-    setShowClubTxModal(false);
-    setIsSubmitting(false);
-    fetchData();
   };
 
-  // 4. 現金/振込による請求決済・未納リセット
   const executePaymentStatusChange = async () => {
     if (!confirmPaymentTarget) return;
-    setIsSubmitting(true);
-
-    const ev = events.find((e) => e.id === confirmPaymentTarget.billing_event_id);
-    const totalAmount = ev?.amount || 0;
-    const isClearing = confirmPaymentTarget.status !== '支払済';
-
-    if (isClearing) {
-      await supabase
-        .from('payments')
-        .update({
-          status: '支払済',
-          paid_amount: totalAmount,
-          payment_method: confirmPaymentMethod,
-        })
-        .eq('id', confirmPaymentTarget.id);
-    } else {
-      const linkedOffsets = offsetTransactions.filter((o) => o.payment_id === confirmPaymentTarget.id);
-      if (linkedOffsets.length > 0) {
-        alert('この請求には相殺履歴があります。「相殺履歴」ボタンから相殺を取り消してください。');
-        setConfirmPaymentTarget(null);
-        setIsSubmitting(false);
-        return;
-      }
-
-      await supabase
-        .from('payments')
-        .update({
-          status: '未納',
-          paid_amount: 0,
-          payment_method: '現金/振込',
-        })
-        .eq('id', confirmPaymentTarget.id);
-    }
-
-    setConfirmPaymentTarget(null);
-    setIsSubmitting(false);
-    fetchData();
+    await runOperation(async () => {
+      await saveClubOperation('set_payment', {
+        id: confirmPaymentTarget.id, expected_paid: confirmPaymentTarget.paid_amount || 0,
+        clear: confirmPaymentTarget.status !== '支払済', method: confirmPaymentMethod,
+      });
+      setConfirmPaymentTarget(null);
+    });
   };
 
-  // 5. 相殺実行
   const handleExecuteOffset = async () => {
     if (!selectedExpenseForOffset || !targetPaymentIdForOffset) return;
-    setIsSubmitting(true);
-
-    const targetPayment = payments.find((p) => p.id === targetPaymentIdForOffset);
-    const targetEvent = events.find((e) => e.id === targetPayment?.billing_event_id);
-    if (!targetPayment || !targetEvent) {
-      setIsSubmitting(false);
-      return;
-    }
-
-    const currentPaid = targetPayment.paid_amount || 0;
-    const remainingToPay = targetEvent.amount - currentPaid;
-    const currentSettled = selectedExpenseForOffset.settled_amount || 0;
-    const availableExpense = selectedExpenseForOffset.amount - currentSettled;
-
-    const offsetAmount = offsetCustomAmount ? parseInt(offsetCustomAmount, 10) : Math.min(remainingToPay, availableExpense);
-
-    if (isNaN(offsetAmount) || offsetAmount <= 0 || offsetAmount > remainingToPay || offsetAmount > availableExpense) {
-      alert('相殺金額が不正です');
-      setIsSubmitting(false);
-      return;
-    }
-
-    const { error: offsetError } = await supabase.from('offset_transactions').insert({
-      member_id: selectedExpenseForOffset.member_id,
-      payment_id: targetPayment.id,
-      expense_id: selectedExpenseForOffset.id,
-      amount: offsetAmount,
+    await runOperation(async () => {
+      const amount = parseAmount(offsetCustomAmount);
+      const payment = payments.find(p => p.id === targetPaymentIdForOffset);
+      if (!payment || payment.member_id !== selectedExpenseForOffset.member_id) throw new Error('同じ部員の未納請求を選択してください。');
+      await saveClubOperation('create_offset', {
+        id: creationId('offset'), payment_id: payment.id, expense_id: selectedExpenseForOffset.id, amount,
+        expected_paid: payment.paid_amount || 0, expected_settled: selectedExpenseForOffset.settled_amount || 0,
+      });
+      delete creationIdsRef.current.offset;
+      setShowOffsetModal(false); setSelectedExpenseForOffset(null);
+      setTargetPaymentIdForOffset(''); setOffsetCustomAmount('');
     });
-
-    if (offsetError) {
-      alert('相殺の記録に失敗しました');
-      setIsSubmitting(false);
-      return;
-    }
-
-    const nextPaidAmount = currentPaid + offsetAmount;
-    const nextPaymentStatus = nextPaidAmount >= targetEvent.amount ? '支払済' : '一部納入';
-    await supabase
-      .from('payments')
-      .update({
-        status: nextPaymentStatus,
-        paid_amount: nextPaidAmount,
-        payment_method: nextPaymentStatus === '支払済' ? '相殺' : `一部相殺`,
-      })
-      .eq('id', targetPayment.id);
-
-    const nextSettledAmount = currentSettled + offsetAmount;
-    const nextExpenseStatus = nextSettledAmount >= selectedExpenseForOffset.amount ? '精算済' : '一部精算';
-    await supabase
-      .from('expenses')
-      .update({
-        status: nextExpenseStatus,
-        settled_amount: nextSettledAmount,
-      })
-      .eq('id', selectedExpenseForOffset.id);
-
-    alert(`¥${offsetAmount.toLocaleString()} を相殺しました`);
-    setShowOffsetModal(false);
-    setSelectedExpenseForOffset(null);
-    setTargetPaymentIdForOffset('');
-    setOffsetCustomAmount('');
-    setIsSubmitting(false);
-    fetchData();
   };
 
-  // 6. 相殺ログ取消
-  const handleCancelOffsetTransaction = async (offsetTx: OffsetTransaction) => {
-    if (!confirm(`¥${offsetTx.amount.toLocaleString()} の相殺を取り消しますか？\n（部費と立替の双方が元の残高へ戻ります）`)) {
-      return;
-    }
-    setIsSubmitting(true);
-
-    const payment = payments.find((p) => p.id === offsetTx.payment_id);
-    const expense = expenses.find((e) => e.id === offsetTx.expense_id);
-    const event = events.find((e) => e.id === payment?.billing_event_id);
-
-    if (payment && event) {
-      const revertedPaid = Math.max(0, (payment.paid_amount || 0) - offsetTx.amount);
-      const nextStatus = revertedPaid === 0 ? '未納' : revertedPaid >= event.amount ? '支払済' : '一部納入';
-      await supabase
-        .from('payments')
-        .update({
-          status: nextStatus,
-          paid_amount: revertedPaid,
-          payment_method: nextStatus === '未納' ? '現金/振込' : payment.payment_method,
-        })
-        .eq('id', payment.id);
-    }
-
-    if (expense) {
-      const revertedSettled = Math.max(0, (expense.settled_amount || 0) - offsetTx.amount);
-      const nextStatus = revertedSettled === 0 ? '未精算' : revertedSettled >= expense.amount ? '精算済' : '一部精算';
-      await supabase
-        .from('expenses')
-        .update({
-          status: nextStatus,
-          settled_amount: revertedSettled,
-        })
-        .eq('id', expense.id);
-    }
-
-    await supabase.from('offset_transactions').delete().eq('id', offsetTx.id);
-
-    alert('相殺を取り消しました');
-    setIsSubmitting(false);
-    fetchData();
+  const handleCancelOffsetTransaction = async (offset: OffsetTransaction) => {
+    if (!confirm(`¥${offset.amount.toLocaleString()} の相殺を取り消しますか？`)) return;
+    await runOperation(() => saveClubOperation('cancel_offset', { id: offset.id }));
   };
 
-  // 7. 現金精算
   const handleCashSettle = async (expense: Expense) => {
-    if (!confirm(`「${expense.title}」を現金精算済にしますか？`)) return;
-    await supabase
-      .from('expenses')
-      .update({
-        status: '精算済',
-        settled_amount: expense.amount,
-        reject_reason: '現金精算',
-      })
-      .eq('id', expense.id);
-    fetchData();
+    const remaining = expense.amount - (expense.settled_amount || 0);
+    if (!confirm(`「${expense.title}」の残額 ¥${remaining.toLocaleString()} を現金で精算済にしますか？`)) return;
+    await runOperation(() => saveClubOperation('set_expense', { id: expense.id, expected_settled: expense.settled_amount || 0, clear: true }));
   };
 
-  // 8. 立替削除
   const handleDeleteExpense = async (expense: Expense) => {
-    if ((expense.settled_amount || 0) > 0) {
-      alert('相殺履歴のある立替は削除できません。先に相殺を取り消してください。');
-      return;
-    }
-    if (!confirm(`「${expense.title}」を削除しますか？`)) return;
-    await supabase.from('expenses').delete().eq('id', expense.id);
-    fetchData();
+    if (!confirm(`未精算の立替「${expense.title}」を削除しますか？`)) return;
+    await runOperation(() => saveClubOperation('delete_expense', { id: expense.id }));
   };
 
-  // 9. 立替の直接取消
   const handleRevertExpense = async (expense: Expense) => {
-    const linkedOffsets = offsetTransactions.filter((o) => o.expense_id === expense.id);
-    if (linkedOffsets.length > 0) {
-      alert('この立替には相殺履歴があります。「相殺履歴」ボタンから該当の相殺を取り消してください。');
-      return;
-    }
-
-    if (!confirm(`「${expense.title}」を未精算に戻しますか？`)) return;
-
-    await supabase
-      .from('expenses')
-      .update({
-        status: '未精算',
-        settled_amount: 0,
-        reject_reason: '',
-      })
-      .eq('id', expense.id);
-
-    fetchData();
+    if (!confirm(`「${expense.title}」の現金精算を取り消しますか？相殺済みの金額は残ります。`)) return;
+    await runOperation(() => saveClubOperation('set_expense', { id: expense.id, expected_settled: expense.settled_amount || 0, clear: false }));
   };
 
   // CSVダウンロード
   const exportToCSV = () => {
-    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額/充当額', '残額', '状態', '日付'];
+    if (actionsDisabled) return;
+    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額/充当額', '残額', '状態', '日付（請求は期日・他は登録日）', '相殺額', '現金納入/精算額', '現金納入/精算日'];
     const rows: string[][] = [];
 
     payments.forEach((p) => {
@@ -645,6 +387,8 @@ export default function Home() {
         String(Math.max(0, total - paid)),
         `${p.status} (${p.payment_method || ''})`,
         ev?.due_date || '',
+        String(accounting.paymentOffsets[p.id] || 0), String(accounting.cashPayments[p.id] || 0),
+        p.paid_at ? japanDate(new Date(p.paid_at)) : '',
       ]);
     });
 
@@ -658,7 +402,8 @@ export default function Home() {
         '-',
         '-',
         t.type,
-        t.created_at?.split('T')[0] || '',
+        t.created_at ? japanDate(new Date(t.created_at)) : '',
+        '0', String(t.amount), t.created_at ? japanDate(new Date(t.created_at)) : '',
       ]);
     });
 
@@ -675,22 +420,23 @@ export default function Home() {
         String(settled),
         String(Math.max(0, total - settled)),
         `${e.status} ${e.reject_reason || ''}`,
-        e.created_at?.split('T')[0] || '',
+        e.created_at ? japanDate(new Date(e.created_at)) : '',
+        String(accounting.expenseOffsets[e.id] || 0), String(accounting.cashExpenses[e.id] || 0),
+        e.settled_at ? japanDate(new Date(e.settled_at)) : '',
       ]);
     });
 
     rows.sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
 
-    const csvContent =
-      'data:text/csv;charset=utf-8,\uFEFF' +
-      [header.join(','), ...rows.map((r) => r.map((c) => `"${c}"`).join(','))].join('\n');
-
+    const blob = new Blob([createCsv([header, ...rows])], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.setAttribute('href', encodeURI(csvContent));
-    link.setAttribute('download', `会計明細_${new Date().toISOString().split('T')[0]}.csv`);
+    link.href = url;
+    link.download = `会計明細_${japanDate()}.csv`;
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   return (
@@ -705,18 +451,21 @@ export default function Home() {
             <div className="flex gap-2">
               <button
                 onClick={() => setShowEventManageModal(true)}
+                disabled={actionsDisabled}
                 className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-3 py-1.5 rounded-xl font-bold transition"
               >
                 請求管理
               </button>
               <button
                 onClick={() => setShowOffsetHistoryModal(true)}
+                disabled={actionsDisabled}
                 className="text-xs sm:text-sm bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-xl font-bold transition"
               >
                 相殺履歴
               </button>
               <button
                 onClick={exportToCSV}
+                disabled={actionsDisabled}
                 className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl text-slate-700 font-bold transition"
               >
                 CSV
@@ -746,6 +495,20 @@ export default function Home() {
       <main className="w-full px-4 py-4 max-w-7xl mx-auto space-y-4">
         {loading ? (
           <p className="text-sm text-slate-400 text-center py-20 font-medium">読み込み中...</p>
+        ) : dataError ? (
+          <div role="alert" className="p-5 bg-white rounded-2xl border border-red-200 space-y-3">
+            <p className="font-bold text-red-700">会計データを読み込めませんでした</p>
+            <p>{dataError}</p>
+            <p className="text-slate-600">残高は確認できていません。保存後にこの表示になった場合は、再読み込みして記録を確認してください。</p>
+            <button onClick={() => void fetchData()} className="px-4 py-2 bg-blue-600 text-white rounded-xl font-bold">再読み込み</button>
+          </div>
+        ) : accounting.issues.length > 0 ? (
+          <div role="alert" className="p-5 bg-white rounded-2xl border border-red-200 space-y-3">
+            <p className="font-bold text-red-700">会計データに不一致があります</p>
+            {accounting.issues.map(issue => <p key={issue}>{issue}</p>)}
+            <p>会計担当が記録を確認するまで、残高表示と変更操作を止めています。</p>
+            <button onClick={() => void fetchData()} className="px-4 py-2 bg-blue-600 text-white rounded-xl font-bold">再読み込み</button>
+          </div>
         ) : (
           <>
             {/* TAB 1: マイページ / 個人 */}
@@ -776,7 +539,8 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-3">
                   {currentMember ? (
                     <button
-                      onClick={() => setShowExpenseModal(true)}
+                      onClick={() => { setReceiptTarget(null); clearSelectedFile(); setShowExpenseModal(true); }}
+                      disabled={actionsDisabled}
                       className="p-4 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
                       <span>📸</span> 立替を申請
@@ -784,6 +548,7 @@ export default function Home() {
                   ) : (
                     <button
                       onClick={() => setShowClubTxModal(true)}
+                      disabled={actionsDisabled}
                       className="p-4 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
                       <span>💸</span> 部費の出納を記録
@@ -791,6 +556,7 @@ export default function Home() {
                   )}
 
                   <button
+                    disabled={actionsDisabled}
                     onClick={() => {
                       setTargetMemberIds(members.map((m) => m.id));
                       setShowEventModal(true);
@@ -879,7 +645,8 @@ export default function Home() {
 
                               <div className="flex items-center gap-2">
                                 <button
-                                  onClick={() => setConfirmPaymentTarget(p)}
+                                  disabled={actionsDisabled}
+                                  onClick={() => { setConfirmPaymentMethod('振込'); setConfirmPaymentTarget(p); }}
                                   className={`text-xs sm:text-sm px-3.5 py-2 rounded-xl font-bold transition shadow-sm ${
                                     p.status === '支払済'
                                       ? 'bg-green-100 text-green-700 border border-green-300'
@@ -893,6 +660,7 @@ export default function Home() {
 
                                 {p.status === '未納' && paidAmount === 0 && (
                                   <button
+                                    disabled={actionsDisabled}
                                     onClick={() => handleDeleteIndividualPayment(p)}
                                     title="この部員の請求を除外"
                                     className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
@@ -973,7 +741,9 @@ export default function Home() {
                                       alt="レシート"
                                       className="w-full h-full object-cover group-hover:scale-105 transition"
                                       onError={(err) => {
-                                        (err.target as HTMLElement).style.display = 'none';
+                                        const image = err.currentTarget;
+                                        image.alt = '写真を読み込めません';
+                                        image.className = 'w-full h-full text-xs text-red-700 bg-red-50';
                                       }}
                                     />
                                     <div className="absolute inset-0 bg-black/20 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-[10px] text-white font-bold">
@@ -983,7 +753,11 @@ export default function Home() {
                                 ) : (
                                   <div className="w-16 h-16 rounded-xl bg-slate-100 shrink-0 border border-slate-200 flex flex-col items-center justify-center text-slate-400 text-xs font-bold">
                                     <span>📄</span>
-                                    <span>写真無</span>
+                                    <button
+                                      disabled={actionsDisabled}
+                                      onClick={() => { setReceiptTarget(e); clearSelectedFile(); setShowExpenseModal(true); }}
+                                      className="text-blue-700 underline"
+                                    >写真を追加</button>
                                   </div>
                                 )}
 
@@ -1030,7 +804,7 @@ export default function Home() {
                                 <div className="grid grid-cols-3 gap-2 pt-2 border-t border-slate-200">
                                   <button
                                     onClick={() => openOffsetModalForExpense(e)}
-                                    disabled={!canOffset}
+                                    disabled={!canOffset || actionsDisabled}
                                     className={`py-2 text-xs font-bold rounded-xl transition ${
                                       canOffset
                                         ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm'
@@ -1041,6 +815,7 @@ export default function Home() {
                                   </button>
 
                                   <button
+                                    disabled={actionsDisabled}
                                     onClick={() => handleCashSettle(e)}
                                     className="py-2 bg-slate-800 hover:bg-slate-900 text-white text-xs font-bold rounded-xl transition shadow-sm"
                                   >
@@ -1048,6 +823,7 @@ export default function Home() {
                                   </button>
 
                                   <button
+                                    disabled={actionsDisabled}
                                     onClick={() => handleDeleteExpense(e)}
                                     className="py-2 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-xl transition"
                                   >
@@ -1059,10 +835,11 @@ export default function Home() {
                               {e.status === '精算済' && (
                                 <div className="flex justify-end pt-1">
                                   <button
+                                    disabled={actionsDisabled}
                                     onClick={() => handleRevertExpense(e)}
                                     className="text-xs text-slate-400 hover:text-slate-600 font-medium underline"
                                   >
-                                    未精算に戻す
+                                    現金精算を取り消す
                                   </button>
                                 </div>
                               )}
@@ -1105,12 +882,17 @@ export default function Home() {
                     <p className="text-xs text-slate-400 mt-1 mb-4">エントリー費・係留料・寄付など</p>
                     <button
                       onClick={() => setShowClubTxModal(true)}
+                      disabled={actionsDisabled}
                       className="w-full p-3.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-sm transition shadow-sm"
                     >
                       出納を記録
                     </button>
                   </div>
                 </div>
+
+                <p className="text-xs text-slate-600 px-1">
+                  登録済みの入出金から計算した残高です。相殺 ¥{accounting.totalOffsetAmount.toLocaleString()} は現金の入出金に含めません。
+                </p>
 
                 {/* 支出 / 収入 表示切り替えタブ（※ 金額表示を削除） */}
                 <div className="flex bg-slate-200/80 p-1 rounded-2xl text-sm font-bold max-w-sm mx-auto">
@@ -1191,7 +973,7 @@ export default function Home() {
                           ))}
 
                         {expenses
-                          .filter((e) => (e.settled_amount || 0) > 0)
+                          .filter((e) => (accounting.cashExpenses[e.id] || 0) > 0)
                           .map((e) => {
                             const mem = members.find((m) => m.id === e.member_id);
                             return (
@@ -1199,7 +981,7 @@ export default function Home() {
                                 <div>
                                   <div className="flex items-center gap-2">
                                     <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md font-bold">
-                                      立替充当・精算
+                                      立替の現金精算
                                     </span>
                                     <span className="text-sm font-bold text-slate-800">{e.title}</span>
                                   </div>
@@ -1208,7 +990,7 @@ export default function Home() {
                                   </p>
                                 </div>
                                 <span className="text-sm font-black tabular-nums text-rose-600">
-                                  -¥{(e.settled_amount || 0).toLocaleString()}
+                                  -¥{(accounting.cashExpenses[e.id] || 0).toLocaleString()}
                                 </span>
                               </div>
                             );
@@ -1256,7 +1038,7 @@ export default function Home() {
                       <h2 className="font-black text-sm text-slate-600 uppercase">収入明細（入金履歴）</h2>
                       <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                         {payments
-                          .filter((p) => (p.paid_amount || 0) > 0 && p.payment_method !== '相殺')
+                          .filter((p) => (accounting.cashPayments[p.id] || 0) > 0)
                           .map((p) => {
                             const ev = events.find((e) => e.id === p.billing_event_id);
                             const mem = members.find((m) => m.id === p.member_id);
@@ -1274,7 +1056,7 @@ export default function Home() {
                                   </p>
                                 </div>
                                 <span className="text-sm font-black tabular-nums text-emerald-600">
-                                  +¥{(p.paid_amount || 0).toLocaleString()}
+                                  +¥{(accounting.cashPayments[p.id] || 0).toLocaleString()}
                                 </span>
                               </div>
                             );
@@ -1425,7 +1207,7 @@ export default function Home() {
                 {events.map((ev) => {
                   const evPayments = payments.filter((p) => p.billing_event_id === ev.id);
                   const paidCount = evPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0).length;
-                  const canDelete = paidCount === 0;
+                  const canDelete = paidCount === 0 && !offsetTransactions.some(o => evPayments.some(p => p.id === o.payment_id));
 
                   return (
                     <div key={ev.id} className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
@@ -1448,7 +1230,7 @@ export default function Home() {
 
                         <button
                           onClick={() => handleDeleteBillingEvent(ev)}
-                          disabled={!canDelete || isSubmitting}
+                          disabled={!canDelete || actionsDisabled}
                           className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
                             canDelete
                               ? 'bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200'
@@ -1506,7 +1288,7 @@ export default function Home() {
                         </div>
                         <button
                           onClick={() => handleCancelOffsetTransaction(o)}
-                          disabled={isSubmitting}
+                          disabled={actionsDisabled}
                           className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200 text-xs font-bold rounded-lg transition"
                         >
                           取消
@@ -1584,6 +1366,7 @@ export default function Home() {
                   <div className="flex gap-2 pt-2">
                     <button
                       type="button"
+                      disabled={isSubmitting}
                       onClick={() => setConfirmPaymentTarget(null)}
                       className="flex-1 py-2.5 text-xs font-bold border border-slate-200 rounded-xl"
                     >
@@ -1592,10 +1375,10 @@ export default function Home() {
                     <button
                       type="button"
                       onClick={executePaymentStatusChange}
-                      disabled={isSubmitting}
+                      disabled={actionsDisabled}
                       className="flex-1 py-2.5 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md"
                     >
-                      {isClearing ? '支払済にする' : '未納に戻す'}
+                      {isClearing ? '支払済にする' : '現金納入を取り消す'}
                     </button>
                   </div>
                 </div>
@@ -1611,6 +1394,7 @@ export default function Home() {
           onClick={() => setPreviewImageUrl(null)}
           className="fixed inset-0 bg-black/85 flex items-center justify-center p-4 z-50 cursor-pointer"
         >
+          {/* eslint-disable-next-line @next/next/no-img-element -- Receipt URLs and local previews are displayed directly. */}
           <img src={previewImageUrl} alt="レシート" className="max-h-[85vh] w-auto rounded-2xl object-contain shadow-2xl" />
         </div>
       )}
@@ -1688,7 +1472,8 @@ export default function Home() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[90vh] overflow-y-auto shadow-2xl">
             <h3 className="font-black text-lg text-slate-800">新規請求の作成</h3>
-            <form onSubmit={handleCreateBillingEvent} className="space-y-3.5">
+            <form onSubmit={handleCreateBillingEvent}>
+              <fieldset disabled={isSubmitting} className="space-y-3.5">
               <div>
                 <label className="text-xs text-slate-600 font-bold block mb-1">請求タイトル</label>
                 <input
@@ -1704,6 +1489,9 @@ export default function Home() {
                 <label className="text-xs text-slate-600 font-bold block mb-1">金額 (1人あたり)</label>
                 <input
                   type="number"
+                  min={1}
+                  max={MAX_AMOUNT}
+                  step={1}
                   placeholder="5000"
                   required
                   value={eventAmount}
@@ -1754,10 +1542,11 @@ export default function Home() {
                 <button type="button" onClick={() => setShowEventModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
+                <button type="submit" disabled={actionsDisabled} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
                   作成
                 </button>
               </div>
+              </fieldset>
             </form>
           </div>
         </div>
@@ -1767,8 +1556,10 @@ export default function Home() {
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
-            <h3 className="font-black text-lg text-slate-800">立替金の申請</h3>
-            <form onSubmit={handleCreateExpense} className="space-y-3.5">
+            <h3 className="font-black text-lg text-slate-800">{receiptTarget ? '領収書写真の追加' : '立替金の申請'}</h3>
+            <form onSubmit={handleCreateExpense}>
+              <fieldset disabled={isSubmitting} className="space-y-3.5">
+              {receiptTarget ? <p className="font-bold">{receiptTarget.title} · ¥{receiptTarget.amount.toLocaleString()}</p> : <>
               <div>
                 <label className="text-xs text-slate-600 font-bold block mb-1">用途・品名</label>
                 <input
@@ -1784,6 +1575,9 @@ export default function Home() {
                 <label className="text-xs text-slate-600 font-bold block mb-1">金額</label>
                 <input
                   type="number"
+                  min={1}
+                  max={MAX_AMOUNT}
+                  step={1}
                   placeholder="3000"
                   required
                   value={expenseAmount}
@@ -1806,8 +1600,9 @@ export default function Home() {
                 </select>
               </div>
 
+              </>}
               <div>
-                <label className="text-xs text-slate-600 font-bold block mb-1.5">レシート写真（任意）</label>
+                <label className="text-xs text-slate-600 font-bold block mb-1.5">{receiptTarget ? 'レシート写真（必須）' : 'レシート写真（任意）'}</label>
                 <input
                   type="file"
                   accept="image/*"
@@ -1818,6 +1613,7 @@ export default function Home() {
 
                 {localReceiptPreview ? (
                   <div className="relative rounded-2xl overflow-hidden border border-slate-200 bg-slate-50 p-2 flex items-center gap-3">
+                    {/* eslint-disable-next-line @next/next/no-img-element -- This is a local Blob URL. */}
                     <img
                       src={localReceiptPreview}
                       alt="プレビュー"
@@ -1825,7 +1621,7 @@ export default function Home() {
                     />
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-bold text-slate-800 truncate">{receiptFile?.name}</p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">添付完了</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">写真を選択済み（保存前）</p>
                     </div>
                     <button
                       type="button"
@@ -1851,10 +1647,11 @@ export default function Home() {
                 <button type="button" onClick={() => setShowExpenseModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-blue-600 text-white font-bold rounded-xl shadow-md">
-                  申請する
+                <button type="submit" disabled={actionsDisabled} className="flex-1 py-3 text-xs bg-blue-600 text-white font-bold rounded-xl shadow-md">
+                  {receiptTarget ? '写真を保存' : '申請する'}
                 </button>
               </div>
+              </fieldset>
             </form>
           </div>
         </div>
@@ -1865,7 +1662,8 @@ export default function Home() {
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 className="font-black text-lg text-slate-800">部費出納の記録</h3>
-            <form onSubmit={handleCreateClubTransaction} className="space-y-3.5">
+            <form onSubmit={handleCreateClubTransaction}>
+              <fieldset disabled={isSubmitting} className="space-y-3.5">
               <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl text-xs font-bold">
                 <button
                   type="button"
@@ -1905,6 +1703,9 @@ export default function Home() {
                 <label className="text-xs text-slate-600 font-bold block mb-1">金額</label>
                 <input
                   type="number"
+                  min={1}
+                  max={MAX_AMOUNT}
+                  step={1}
                   placeholder="50000"
                   required
                   value={txAmount}
@@ -1933,7 +1734,7 @@ export default function Home() {
                   <label className="text-xs text-slate-600 font-bold block mb-1">出納元</label>
                   <select
                     value={txSource}
-                    onChange={(e) => setTxSource(e.target.value as any)}
+                    onChange={(e) => setTxSource(e.target.value as ClubTransaction['payment_source'])}
                     className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
                   >
                     <option value="部口座振込">部口座振込</option>
@@ -1956,10 +1757,11 @@ export default function Home() {
                 <button type="button" onClick={() => setShowClubTxModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                   戻る
                 </button>
-                <button type="submit" disabled={isSubmitting} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
+                <button type="submit" disabled={actionsDisabled} className="flex-1 py-3 text-xs bg-slate-900 text-white font-bold rounded-xl shadow-md">
                   登録する
                 </button>
               </div>
+              </fieldset>
             </form>
           </div>
         </div>
@@ -1980,6 +1782,7 @@ export default function Home() {
             <div>
               <label className="text-xs text-slate-600 font-bold block mb-1">充当先の未納請求</label>
               <select
+                disabled={isSubmitting}
                 value={targetPaymentIdForOffset}
                 onChange={(e) => handleTargetPaymentChange(e.target.value)}
                 className="w-full p-2.5 border border-slate-200 rounded-xl text-xs font-semibold"
@@ -2002,7 +1805,11 @@ export default function Home() {
               <label className="text-xs text-slate-600 font-bold block mb-1">相殺金額（最大額を自動入力済）</label>
               <input
                 type="number"
+                  min={1}
+                  max={MAX_AMOUNT}
+                  step={1}
                 placeholder="例: 3000"
+                disabled={isSubmitting}
                 value={offsetCustomAmount}
                 onChange={(e) => setOffsetCustomAmount(e.target.value)}
                 className="w-full p-2.5 border border-slate-200 rounded-xl text-sm font-black tabular-nums text-slate-900"
@@ -2010,13 +1817,13 @@ export default function Home() {
             </div>
 
             <div className="flex gap-2 pt-2">
-              <button type="button" onClick={() => setShowOffsetModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
+              <button type="button" disabled={isSubmitting} onClick={() => setShowOffsetModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
                 戻る
               </button>
               <button
                 type="button"
                 onClick={handleExecuteOffset}
-                disabled={isSubmitting}
+                disabled={actionsDisabled}
                 className="flex-1 py-3 text-xs bg-amber-500 text-white font-bold rounded-xl shadow-md"
               >
                 相殺を実行

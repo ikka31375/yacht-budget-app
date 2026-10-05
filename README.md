@@ -1,36 +1,61 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# ヨット部 部費管理アプリ
 
-## Getting Started
+部員ごとの部費請求・納入、立替申請・精算、部費と立替の相殺、部の直接出納を管理するアプリです。Next.js と Supabase を使用します。
 
-First, run the development server:
+## 起動
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+`.env.local` に以下を設定します。値は Supabase の対象プロジェクトで確認してください。
+
+```dotenv
+NEXT_PUBLIC_SUPABASE_URL=https://YOUR_PROJECT.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLISHABLE_OR_ANON_KEY
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+ブラウザに公開するキーには publishable key または anon key を使用します。secret key / service_role key は設定しないでください。
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm ci
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+ブラウザで `http://localhost:3000` を開きます。
 
-## Learn More
+## 2026年10月の会計処理の更新
 
-To learn more about Next.js, take a look at the following resources:
+更新前に、対象プロジェクトが正しいことと、既存の6テーブルの構造を確認してください。更新SQLはデータの削除や金額の書き換えを行いません。
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Supabase SQL Editor で `supabase/migrations/202610050001_safe_accounting.sql` を実行します。保存処理を1つのトランザクションにまとめる関数と、全件を同じ時点で読み取る関数を追加します。
+2. このアプリを公開し、公開URLで表示と読み込みを確認します。Vercel の環境変数も上記の2つが必要です。
+3. `supabase/migrations/202610050002_require_safe_writes.sql` を実行します。旧版の画面からの直接書き込みを防ぎます。部員には画面の再読み込みを案内してください。
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+SQLは同じものを再実行できます。2番目のSQLを実行した後に旧版へ戻すと、旧版の保存処理は拒否されます。
 
-## Deploy on Vercel
+保存関数は呼び出し元の権限とRLS設定を使用します。新たなテーブル権限や、部員・会計担当のログイン機能は追加していません。
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 修正後の動作
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- 相殺・取消・請求作成は、途中で失敗すると関連する更新がすべて取り消されます。
+- 相殺、現金精算、削除の判断にはデータベースの現在の残額を使用します。古い画面からの更新は拒否します。
+- 送信中の二重操作を防止します。新規登録の通信結果が不明な場合は、同じ操作IDで再試行して重複登録を防ぎます。
+- 保存に失敗した入力や写真は画面に残ります。写真の保存に失敗した場合は立替申請を確定しません。既存の立替に写真を追加できます。
+- 現金・振込の出納集計では相殺額を除きます。明細とカテゴリ別集計に同じ計算を使用します。
+- 金額は1円以上の整数のみを受け付けます。CSVは引用符、改行、`#` を保持します。
+- 読み込みの失敗や既存の相殺履歴との不一致がある場合は、残高表示と更新を止め、確認を促します。
+- 現金の納入・精算日を記録します。過去の精算日は推測して補完しません。
+
+## 検証
+
+```bash
+npm test
+npm run lint
+npx tsc --noEmit --incremental false
+npm run build -- --webpack
+```
+
+テストは一時的なPostgreSQL環境をメモリ上に作成し、失敗時のロールバック、再送、残額の検証、旧版からの書き込み拒否、RLS、1,000件を超える読み込みを確認します。Supabaseの実データは変更しません。
+
+## 引き続き必要な運用上の対応
+
+現在の部員選択はログイン認証ではありません。ログインと会計担当の操作権限は別途設計・実装が必要です。データベースで公開アクセスが許可されている場合、この更新だけでは部外者からのアクセスを防げません。
+
+期首残高・年度別の締め処理・出納の訂正履歴は未実装です。表示する部費残高は、登録された現金収入から現金支出を引いた金額です。既存データに不一致がある場合は、元の証憑と照合してから修正してください。

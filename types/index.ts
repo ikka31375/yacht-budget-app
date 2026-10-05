@@ -22,6 +22,7 @@ export interface Payment {
   status: '未納' | '支払済' | '一部納入';
   paid_amount: number;
   payment_method?: string;
+  paid_at?: string | null;
 }
 
 export interface Expense {
@@ -35,6 +36,7 @@ export interface Expense {
   settled_amount: number;
   reject_reason?: string;
   created_at?: string;
+  settled_at?: string | null;
 }
 
 export interface OffsetTransaction {
