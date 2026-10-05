@@ -1,4 +1,4 @@
-import type { BillingEvent, ClubTransaction, Expense, Member, OffsetTransaction, Payment } from '../types';
+import type { BillingEvent, ClubTransaction, Expense, Member, OffsetTransaction, Payment, RecordReview } from '../types';
 
 export interface ClubData {
   members: Member[];
@@ -22,6 +22,89 @@ export function parseAmount(input: string): number {
 
 export function japanDate(date = new Date()): string {
   return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Tokyo' }).format(date);
+}
+
+export function parseDate(value: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || value.startsWith('0000')) throw new Error('日付を入力してください。');
+  const date = new Date(`${value}T00:00:00Z`);
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) throw new Error('正しい日付を入力してください。');
+  return value;
+}
+
+export function paymentDate(payment: Payment): string | null {
+  return payment.paid_on || (!payment.source_reference && !payment.date_provisional && payment.paid_at ? japanDate(new Date(payment.paid_at)) : null);
+}
+
+export function expenseSettlementDate(expense: Expense): string | null {
+  return expense.settled_on || (!expense.source_reference && !expense.date_provisional && expense.settled_at ? japanDate(new Date(expense.settled_at)) : null);
+}
+
+export function transactionDate(transaction: ClubTransaction): string | null {
+  return transaction.transaction_date || (!transaction.source_reference && transaction.created_at ? japanDate(new Date(transaction.created_at)) : null);
+}
+
+export interface CashEntry {
+  id: string;
+  kind: 'payment' | 'expense' | 'club';
+  recordId: string;
+  date: string | null;
+  title: string;
+  party: string;
+  category: string;
+  direction: '収入' | '支出';
+  amount: number;
+  dateProvisional: boolean;
+  settlementProvisional: boolean;
+  reviewNote: string;
+  sourceReference: string;
+}
+
+export function cashEntries(data: ClubData): CashEntry[] {
+  const totals = calculateAccounting(data);
+  const members = new Map(data.members.map(m => [m.id, m.name]));
+  const events = new Map(data.events.map(e => [e.id, e.title]));
+  const review = (record: RecordReview) => ({dateProvisional: !!record.date_provisional, reviewNote: record.review_note || '', sourceReference: record.source_reference || ''});
+  return [
+    ...data.payments.filter(p => totals.cashPayments[p.id] > 0).map(p => ({
+      id: `payment:${p.id}`, kind: 'payment' as const, recordId: p.id, date: paymentDate(p),
+      title: events.get(p.billing_event_id) || '部費', party: members.get(p.member_id) || '部員不明',
+      category: '部費納入 (現金/振込)', direction: '収入' as const, amount: totals.cashPayments[p.id], settlementProvisional: false, ...review(p),
+    })),
+    ...data.expenses.filter(e => totals.cashExpenses[e.id] > 0).map(e => ({
+      id: `expense:${e.id}`, kind: 'expense' as const, recordId: e.id, date: expenseSettlementDate(e),
+      title: e.title, party: members.get(e.member_id) || '部員不明', category: e.category,
+      direction: '支出' as const, amount: totals.cashExpenses[e.id], settlementProvisional: !!e.settlement_provisional, ...review(e),
+    })),
+    ...data.clubTransactions.map(t => ({
+      id: `club:${t.id}`, kind: 'club' as const, recordId: t.id, date: transactionDate(t),
+      title: t.title, party: t.payment_source, category: t.category, direction: t.type,
+      amount: t.amount, settlementProvisional: false, ...review(t),
+    })),
+  ].sort((a,b) => (b.date || '').localeCompare(a.date || '') || a.id.localeCompare(b.id));
+}
+
+export function fiscalYear(date: string): number {
+  parseDate(date);
+  const year = Number(date.slice(0,4));
+  return Number(date.slice(5,7)) < 4 ? year - 1 : year;
+}
+
+export function periodBounds(mode: 'all' | 'month' | 'year', period: string): {start: string; end: string} | null {
+  if (mode === 'all') return null;
+  if (mode === 'year') {
+    if (!/^\d{4}$/.test(period) || Number(period) < 1 || Number(period) >= 9999) throw new Error('年度を選択してください。');
+    return {start: `${period}-04-01`, end: `${Number(period)+1}-04-01`};
+  }
+  const start = parseDate(`${period}-01`);
+  const next = new Date(`${start}T00:00:00Z`);
+  next.setUTCMonth(next.getUTCMonth()+1);
+  return {start, end: next.toISOString().slice(0,10)};
+}
+
+export function summarizeEntries(entries: CashEntry[]) {
+  const income = entries.filter(e => e.direction === '収入').reduce((sum,e) => sum+e.amount,0);
+  const expense = entries.filter(e => e.direction === '支出').reduce((sum,e) => sum+e.amount,0);
+  return {income, expense, net: income-expense};
 }
 
 export function errorMessage(error: unknown): string {

@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Member, Payment, Expense, BillingEvent, ClubTransaction, OffsetTransaction } from '@/types';
-import { calculateAccounting, createCsv, errorMessage, japanDate, MAX_AMOUNT, parseAmount } from '@/lib/accounting';
+import { calculateAccounting, createCsv, errorMessage, japanDate, MAX_AMOUNT, parseAmount, parseDate, paymentDate, expenseSettlementDate, transactionDate, type CashEntry } from '@/lib/accounting';
+import AccountingReport from '@/components/AccountingReport';
+import RecordDateEditor, {type DateEditTarget} from '@/components/RecordDateEditor';
 import { fetchClubData, saveClubOperation } from '@/lib/data';
 
 // 洗練された大分類カテゴリ（固定）
@@ -36,7 +38,12 @@ export default function Home() {
   // フィルター
   const [paymentFilter, setPaymentFilter] = useState<'unpaid' | 'paid' | 'all'>('unpaid');
   const [expenseFilter, setExpenseFilter] = useState<'unsettled' | 'settled' | 'all'>('unsettled');
-  const [clubTxViewMode, setClubTxViewMode] = useState<'expense' | 'income'>('expense');
+  const [dateEditTarget, setDateEditTarget] = useState<DateEditTarget | null>(null);
+  const [cashSettleTarget, setCashSettleTarget] = useState<Expense | null>(null);
+  const [cashSettleDate, setCashSettleDate] = useState(japanDate());
+  const [paidOn, setPaidOn] = useState(japanDate());
+  const [expenseDate, setExpenseDate] = useState(japanDate());
+  const [txDate, setTxDate] = useState(japanDate());
 
   // モーダル
   const [showEventModal, setShowEventModal] = useState(false);
@@ -73,7 +80,7 @@ export default function Home() {
   const [txTitle, setTxTitle] = useState('');
   const [txAmount, setTxAmount] = useState('');
   const [txCategory, setTxCategory] = useState(EXPENSE_CATEGORIES[0]);
-  const [txSource, setTxSource] = useState<'部口座振込' | '部室現金'>('部口座振込');
+  const [txSource, setTxSource] = useState<ClubTransaction['payment_source']>('部口座振込');
   const [txEventTag, setTxEventTag] = useState('');
 
   // フォーム: 相殺（自動MAX初期値）
@@ -92,7 +99,7 @@ export default function Home() {
     try {
       const data = await fetchClubData();
       if (version !== loadVersionRef.current) return;
-      setMembers(data.members.sort((a, b) => a.grade - b.grade || a.name.localeCompare(b.name, 'ja')));
+      setMembers(data.members.sort((a, b) => Number(a.is_active === false) - Number(b.is_active === false) || a.grade - b.grade || a.name.localeCompare(b.name, 'ja')));
       setPayments(data.payments);
       const newest = (a: { created_at?: string }, b: { created_at?: string }) => (b.created_at || '').localeCompare(a.created_at || '');
       setExpenses(data.expenses.sort(newest));
@@ -153,7 +160,7 @@ export default function Home() {
   };
 
   const accounting = calculateAccounting({ members, payments, expenses, events, clubTransactions, offsetTransactions });
-  const { categorySpendingMap, categoryIncomeMap, totalAllExpenses, totalAllIncomes, estimatedClubTreasury } = accounting;
+  const activeMembers = members.filter(m => m.is_active !== false);
   const actionsDisabled = loading || isSubmitting || !!dataError || accounting.issues.length > 0;
 
   const runOperation = async (action: () => Promise<void>) => {
@@ -295,7 +302,7 @@ export default function Home() {
       } else {
         await saveClubOperation('create_expense', {
           id: creationId('expense'), member_id: selectedMemberId, title: expenseTitle.trim(),
-          amount, category: expenseCategory, receipt_url: receiptUrl,
+          amount, category: expenseCategory, receipt_url: receiptUrl, incurred_on: parseDate(expenseDate),
         });
         delete creationIdsRef.current.expense;
       }
@@ -311,7 +318,7 @@ export default function Home() {
       if (!txTitle.trim()) throw new Error('品名・内容を入力してください。');
       await saveClubOperation('create_club_transaction', {
         id: creationId('club'), type: txType, title: txTitle.trim(), amount,
-        category: txCategory, payment_source: txSource, event_tag: txEventTag.trim() || null,
+        transaction_date: parseDate(txDate), category: txCategory, payment_source: txSource, event_tag: txEventTag.trim() || null,
       });
       delete creationIdsRef.current.club;
       setTxTitle(''); setTxAmount(''); setTxEventTag(''); setShowClubTxModal(false);
@@ -323,7 +330,7 @@ export default function Home() {
     await runOperation(async () => {
       await saveClubOperation('set_payment', {
         id: confirmPaymentTarget.id, expected_paid: confirmPaymentTarget.paid_amount || 0,
-        clear: confirmPaymentTarget.status !== '支払済', method: confirmPaymentMethod,
+        clear: confirmPaymentTarget.status !== '支払済', method: confirmPaymentMethod, paid_on: confirmPaymentTarget.status !== '支払済' ? parseDate(paidOn) : null,
       });
       setConfirmPaymentTarget(null);
     });
@@ -351,9 +358,24 @@ export default function Home() {
   };
 
   const handleCashSettle = async (expense: Expense) => {
-    const remaining = expense.amount - (expense.settled_amount || 0);
-    if (!confirm(`「${expense.title}」の残額 ¥${remaining.toLocaleString()} を現金で精算済にしますか？`)) return;
-    await runOperation(() => saveClubOperation('set_expense', { id: expense.id, expected_settled: expense.settled_amount || 0, clear: true }));
+    setCashSettleDate(japanDate()); setCashSettleTarget(expense);
+  };
+  const executeCashSettle = async () => {
+    if (!cashSettleTarget) return;
+    await runOperation(async () => {
+      await saveClubOperation('set_expense', {id: cashSettleTarget.id, expected_settled: cashSettleTarget.settled_amount || 0, clear: true, settled_on: parseDate(cashSettleDate)});
+      setCashSettleTarget(null);
+    });
+  };
+  const editCashEntry = (entry: CashEntry) => {
+    if (entry.kind === 'payment') {const record = payments.find(p => p.id === entry.recordId); if (record) setDateEditTarget({kind:'payment',record,title:entry.title});}
+    if (entry.kind === 'expense') {const record = expenses.find(p => p.id === entry.recordId); if (record) setDateEditTarget({kind:'expense',record,title:entry.title});}
+    if (entry.kind === 'club') {const record = clubTransactions.find(p => p.id === entry.recordId); if (record) setDateEditTarget({kind:'club',record,title:entry.title});}
+  };
+  const confirmImportedSettlement = async (id: string) => {
+    const record = expenses.find(e => e.id === id);
+    if (!record || !confirm(`「${record.title}」の精算済みを確認済みにしますか？`)) return;
+    await runOperation(() => saveClubOperation('confirm_import_settlement', {id,expected_settled:record.settled_amount || 0}));
   };
 
   const handleDeleteExpense = async (expense: Expense) => {
@@ -388,7 +410,7 @@ export default function Home() {
         `${p.status} (${p.payment_method || ''})`,
         ev?.due_date || '',
         String(accounting.paymentOffsets[p.id] || 0), String(accounting.cashPayments[p.id] || 0),
-        p.paid_at ? japanDate(new Date(p.paid_at)) : '',
+        paymentDate(p) || '',
       ]);
     });
 
@@ -402,8 +424,8 @@ export default function Home() {
         '-',
         '-',
         t.type,
-        t.created_at ? japanDate(new Date(t.created_at)) : '',
-        '0', String(t.amount), t.created_at ? japanDate(new Date(t.created_at)) : '',
+        transactionDate(t) || '',
+        '0', String(t.amount), transactionDate(t) || '',
       ]);
     });
 
@@ -422,7 +444,7 @@ export default function Home() {
         `${e.status} ${e.reject_reason || ''}`,
         e.created_at ? japanDate(new Date(e.created_at)) : '',
         String(accounting.expenseOffsets[e.id] || 0), String(accounting.cashExpenses[e.id] || 0),
-        e.settled_at ? japanDate(new Date(e.settled_at)) : '',
+        expenseSettlementDate(e) || '',
       ]);
     });
 
@@ -483,7 +505,7 @@ export default function Home() {
               <option value="">-- 全体 --</option>
               {members.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.grade}年 {m.name} ({m.role})
+                  {m.is_active === false ? '退部' : `${m.grade}年`} {m.name} ({m.role})
                 </option>
               ))}
             </select>
@@ -539,15 +561,15 @@ export default function Home() {
                 <div className="grid grid-cols-2 gap-3">
                   {currentMember ? (
                     <button
-                      onClick={() => { setReceiptTarget(null); clearSelectedFile(); setShowExpenseModal(true); }}
-                      disabled={actionsDisabled}
+                      onClick={() => { setExpenseDate(japanDate()); setReceiptTarget(null); clearSelectedFile(); setShowExpenseModal(true); }}
+                      disabled={actionsDisabled || currentMember.is_active === false}
                       className="p-4 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
                       <span>📸</span> 立替を申請
                     </button>
                   ) : (
                     <button
-                      onClick={() => setShowClubTxModal(true)}
+                      onClick={() => {setTxDate(japanDate());setShowClubTxModal(true);}}
                       disabled={actionsDisabled}
                       className="p-4 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                     >
@@ -558,7 +580,7 @@ export default function Home() {
                   <button
                     disabled={actionsDisabled}
                     onClick={() => {
-                      setTargetMemberIds(members.map((m) => m.id));
+                      setTargetMemberIds(activeMembers.map((m) => m.id));
                       setShowEventModal(true);
                     }}
                     className="p-4 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
@@ -646,7 +668,7 @@ export default function Home() {
                               <div className="flex items-center gap-2">
                                 <button
                                   disabled={actionsDisabled}
-                                  onClick={() => { setConfirmPaymentMethod('振込'); setConfirmPaymentTarget(p); }}
+                                  onClick={() => { setPaidOn(japanDate()); setConfirmPaymentMethod('振込'); setConfirmPaymentTarget(p); }}
                                   className={`text-xs sm:text-sm px-3.5 py-2 rounded-xl font-bold transition shadow-sm ${
                                     p.status === '支払済'
                                       ? 'bg-green-100 text-green-700 border border-green-300'
@@ -769,6 +791,9 @@ export default function Home() {
                                     <span className="text-xs text-slate-500 font-medium">{member?.name}</span>
                                   </div>
                                   <p className="font-bold text-sm text-slate-900 truncate mt-1">{e.title}</p>
+                                  {e.settlement_provisional && <p className="text-xs text-amber-700 font-bold">精算済みとして仮登録・要確認</p>}
+                                  {e.incurred_on && <p className="text-xs text-slate-500">購入日: {e.incurred_on}</p>}
+                                  {e.review_note && <p className="text-xs text-slate-500 whitespace-pre-wrap">{e.review_note}</p>}
                                   <p className="text-base font-black text-slate-900 tabular-nums">
                                     ¥{e.amount.toLocaleString()}
                                     {e.status === '一部精算' && (
@@ -853,241 +878,7 @@ export default function Home() {
             )}
 
             {/* TAB 2: 全体会計 */}
-            {activeTab === 'club' && (
-              <div className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                  <div className="md:col-span-2 bg-slate-900 text-white p-6 rounded-3xl shadow-lg space-y-4">
-                    <span className="text-sm text-slate-400 font-medium">部の手元資金（部口座＋部室現金）</span>
-                    <div className="text-3xl sm:text-4xl font-black tabular-nums tracking-tight">
-                      ¥{estimatedClubTreasury.toLocaleString()}
-                    </div>
-                    <div className="grid grid-cols-2 gap-3 pt-3 border-t border-slate-800 text-sm">
-                      <div>
-                        <span className="text-slate-400 text-xs block">現金の総入金（部費+寄付）</span>
-                        <span className="font-bold text-emerald-400 tabular-nums text-base">
-                          +¥{totalAllIncomes.toLocaleString()}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-slate-400 text-xs block">現金の総出金（部支出+精算）</span>
-                        <span className="font-bold text-rose-400 tabular-nums text-base">
-                          -¥{totalAllExpenses.toLocaleString()}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm flex flex-col justify-center">
-                    <p className="text-sm text-slate-700 font-bold">部費出納</p>
-                    <p className="text-xs text-slate-400 mt-1 mb-4">エントリー費・係留料・寄付など</p>
-                    <button
-                      onClick={() => setShowClubTxModal(true)}
-                      disabled={actionsDisabled}
-                      className="w-full p-3.5 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl font-bold text-sm transition shadow-sm"
-                    >
-                      出納を記録
-                    </button>
-                  </div>
-                </div>
-
-                <p className="text-xs text-slate-600 px-1">
-                  登録済みの入出金から計算した残高です。相殺 ¥{accounting.totalOffsetAmount.toLocaleString()} は現金の入出金に含めません。
-                </p>
-
-                {/* 支出 / 収入 表示切り替えタブ（※ 金額表示を削除） */}
-                <div className="flex bg-slate-200/80 p-1 rounded-2xl text-sm font-bold max-w-sm mx-auto">
-                  <button
-                    onClick={() => setClubTxViewMode('expense')}
-                    className={`flex-1 py-2 rounded-xl transition ${
-                      clubTxViewMode === 'expense' ? 'bg-white text-rose-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    支出の内訳・明細
-                  </button>
-                  <button
-                    onClick={() => setClubTxViewMode('income')}
-                    className={`flex-1 py-2 rounded-xl transition ${
-                      clubTxViewMode === 'income' ? 'bg-white text-emerald-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-                    }`}
-                  >
-                    収入の内訳・明細
-                  </button>
-                </div>
-
-                {/* 支出ビュー */}
-                {clubTxViewMode === 'expense' && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
-                      <div className="flex justify-between items-center">
-                        <h2 className="font-black text-sm text-slate-600 uppercase">支出カテゴリ別</h2>
-                        <span className="text-sm font-bold text-rose-600 tabular-nums">
-                          計: -¥{totalAllExpenses.toLocaleString()}
-                        </span>
-                      </div>
-                      {totalAllExpenses === 0 ? (
-                        <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
-                      ) : (
-                        <div className="space-y-3">
-                          {Object.entries(categorySpendingMap).map(([cat, amt]) => {
-                            const percent = Math.round((amt / totalAllExpenses) * 100);
-                            return (
-                              <div key={cat} className="space-y-1">
-                                <div className="flex justify-between text-xs sm:text-sm font-semibold">
-                                  <span className="text-slate-700">{cat}</span>
-                                  <span className="text-slate-900 tabular-nums">
-                                    ¥{amt.toLocaleString()} ({percent}%)
-                                  </span>
-                                </div>
-                                <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
-                                  <div className="bg-rose-500 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </section>
-
-                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                      <h2 className="font-black text-sm text-slate-600 uppercase">支出明細（何に使ったか）</h2>
-                      <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                        {clubTransactions
-                          .filter((t) => t.type === '支出')
-                          .map((t) => (
-                            <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[10px] bg-slate-200 text-slate-700 px-2 py-0.5 rounded-md font-bold">
-                                    部費出納
-                                  </span>
-                                  <span className="text-sm font-bold text-slate-800">{t.title}</span>
-                                </div>
-                                <p className="text-xs text-slate-500 mt-1">
-                                  {t.category} | {t.payment_source} {t.event_tag && `[${t.event_tag}]`}
-                                </p>
-                              </div>
-                              <span className="text-sm font-black tabular-nums text-rose-600">
-                                -¥{t.amount.toLocaleString()}
-                              </span>
-                            </div>
-                          ))}
-
-                        {expenses
-                          .filter((e) => (accounting.cashExpenses[e.id] || 0) > 0)
-                          .map((e) => {
-                            const mem = members.find((m) => m.id === e.member_id);
-                            return (
-                              <div key={e.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
-                                <div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] bg-blue-100 text-blue-800 px-2 py-0.5 rounded-md font-bold">
-                                      立替の現金精算
-                                    </span>
-                                    <span className="text-sm font-bold text-slate-800">{e.title}</span>
-                                  </div>
-                                  <p className="text-xs text-slate-500 mt-1">
-                                    {e.category} | {mem?.name}
-                                  </p>
-                                </div>
-                                <span className="text-sm font-black tabular-nums text-rose-600">
-                                  -¥{(accounting.cashExpenses[e.id] || 0).toLocaleString()}
-                                </span>
-                              </div>
-                            );
-                          })}
-                      </div>
-                    </section>
-                  </div>
-                )}
-
-                {/* 収入ビュー */}
-                {clubTxViewMode === 'income' && (
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-4">
-                      <div className="flex justify-between items-center">
-                        <h2 className="font-black text-sm text-slate-600 uppercase">収入カテゴリ別</h2>
-                        <span className="text-sm font-bold text-emerald-600 tabular-nums">
-                          計: +¥{totalAllIncomes.toLocaleString()}
-                        </span>
-                      </div>
-                      {totalAllIncomes === 0 ? (
-                        <p className="text-sm text-slate-400 text-center py-6">データはありません</p>
-                      ) : (
-                        <div className="space-y-3">
-                          {Object.entries(categoryIncomeMap).map(([cat, amt]) => {
-                            const percent = Math.round((amt / totalAllIncomes) * 100);
-                            return (
-                              <div key={cat} className="space-y-1">
-                                <div className="flex justify-between text-xs sm:text-sm font-semibold">
-                                  <span className="text-slate-700">{cat}</span>
-                                  <span className="text-slate-900 tabular-nums">
-                                    ¥{amt.toLocaleString()} ({percent}%)
-                                  </span>
-                                </div>
-                                <div className="w-full bg-slate-100 h-2.5 rounded-full overflow-hidden">
-                                  <div className="bg-emerald-500 h-2.5 rounded-full" style={{ width: `${percent}%` }}></div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </section>
-
-                    <section className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                      <h2 className="font-black text-sm text-slate-600 uppercase">収入明細（入金履歴）</h2>
-                      <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
-                        {payments
-                          .filter((p) => (accounting.cashPayments[p.id] || 0) > 0)
-                          .map((p) => {
-                            const ev = events.find((e) => e.id === p.billing_event_id);
-                            const mem = members.find((m) => m.id === p.member_id);
-                            return (
-                              <div key={p.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
-                                <div>
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
-                                      部費納入
-                                    </span>
-                                    <span className="text-sm font-bold text-slate-800">{ev?.title}</span>
-                                  </div>
-                                  <p className="text-xs text-slate-500 mt-1">
-                                    納入者: {mem?.name} | {p.payment_method}
-                                  </p>
-                                </div>
-                                <span className="text-sm font-black tabular-nums text-emerald-600">
-                                  +¥{(accounting.cashPayments[p.id] || 0).toLocaleString()}
-                                </span>
-                              </div>
-                            );
-                          })}
-
-                        {clubTransactions
-                          .filter((t) => t.type === '収入')
-                          .map((t) => (
-                            <div key={t.id} className="p-3.5 border border-slate-100 rounded-xl bg-slate-50 flex justify-between items-center">
-                              <div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[10px] bg-emerald-100 text-emerald-800 px-2 py-0.5 rounded-md font-bold">
-                                    寄付・支援
-                                  </span>
-                                  <span className="text-sm font-bold text-slate-800">{t.title}</span>
-                                </div>
-                                <p className="text-xs text-slate-500 mt-1">
-                                  {t.category} | {t.payment_source} {t.event_tag && `[${t.event_tag}]`}
-                                </p>
-                              </div>
-                              <span className="text-sm font-black tabular-nums text-emerald-600">
-                                +¥{t.amount.toLocaleString()}
-                              </span>
-                            </div>
-                          ))}
-                      </div>
-                    </section>
-                  </div>
-                )}
-              </div>
-            )}
+            {activeTab === 'club' && <AccountingReport data={{members,payments,expenses,events,clubTransactions,offsetTransactions}} disabled={actionsDisabled} onCreate={() => {setTxDate(japanDate());setShowClubTxModal(true);}} onEdit={editCashEntry} onConfirm={confirmImportedSettlement} onRevert={id => {const record = expenses.find(e => e.id === id);if(record) void handleRevertExpense(record);}}/>}
 
             {/* TAB 3: 部員一覧 */}
             {activeTab === 'members' && (
@@ -1108,7 +899,7 @@ export default function Home() {
                         <div className="flex justify-between items-start">
                           <div>
                             <span className="font-bold text-base text-slate-900">
-                              {m.grade}年 {m.name}
+                              {m.is_active === false ? '退部' : `${m.grade}年`} {m.name}
                             </span>
                             <span className="ml-2 text-xs bg-slate-100 text-slate-600 px-2 py-0.5 rounded font-medium">
                               {m.role}
@@ -1309,6 +1100,8 @@ export default function Home() {
         </div>
       )}
 
+      {dateEditTarget && <RecordDateEditor key={`${dateEditTarget.kind}:${dateEditTarget.record.id}`} target={dateEditTarget} disabled={actionsDisabled} onClose={() => setDateEditTarget(null)} onSave={payload => runOperation(async () => {await saveClubOperation('set_record_dates',payload);setDateEditTarget(null);})}/>}
+      {cashSettleTarget && <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50"><div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4"><h3 className="font-black">立替の精算</h3><p>{cashSettleTarget.title} · 残額 ¥{(cashSettleTarget.amount-(cashSettleTarget.settled_amount||0)).toLocaleString()}</p><label className="block text-xs font-bold">精算日<input type="date" required value={cashSettleDate} onChange={e=>setCashSettleDate(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label><div className="flex gap-2"><button disabled={isSubmitting} onClick={()=>setCashSettleTarget(null)} className="p-3 border rounded-xl flex-1">戻る</button><button disabled={actionsDisabled} onClick={executeCashSettle} className="p-3 bg-slate-900 text-white rounded-xl flex-1">精算済みにする</button></div></div></div>}
       {/* モーダル: 納入確認 */}
       {confirmPaymentTarget && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
@@ -1335,6 +1128,7 @@ export default function Home() {
 
                   {isClearing && (
                     <div>
+                      <label className="block text-xs font-bold mb-3">納入日<input type="date" required value={paidOn} onChange={e => setPaidOn(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label>
                       <label className="text-xs text-slate-600 font-bold block mb-1">納入方法</label>
                       <div className="grid grid-cols-2 gap-2">
                         <button
@@ -1405,7 +1199,7 @@ export default function Home() {
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
             <div className="flex justify-between items-start border-b pb-3">
               <h3 className="font-black text-lg text-slate-800">
-                {selectedMemberDetail.grade}年 {selectedMemberDetail.name} ({selectedMemberDetail.role})
+                {selectedMemberDetail.is_active === false ? '退部' : `${selectedMemberDetail.grade}年`} {selectedMemberDetail.name} ({selectedMemberDetail.role})
               </h3>
               <button onClick={() => setSelectedMemberDetail(null)} className="text-slate-400 hover:text-slate-600 font-bold text-xl">
                 ✕
@@ -1514,8 +1308,8 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => {
-                      if (targetMemberIds.length === members.length) setTargetMemberIds([]);
-                      else setTargetMemberIds(members.map((m) => m.id));
+                      if (targetMemberIds.length === activeMembers.length) setTargetMemberIds([]);
+                      else setTargetMemberIds(activeMembers.map((m) => m.id));
                     }}
                     className="text-xs text-blue-600 underline font-bold"
                   >
@@ -1523,7 +1317,7 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="max-h-32 overflow-y-auto border border-slate-100 rounded-xl p-2 space-y-1 bg-slate-50">
-                  {members.map((m) => (
+                  {activeMembers.map((m) => (
                     <label key={m.id} className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer p-1">
                       <input
                         type="checkbox"
@@ -1533,7 +1327,7 @@ export default function Home() {
                           else setTargetMemberIds(targetMemberIds.filter((id) => id !== m.id));
                         }}
                       />
-                      {m.grade}年 {m.name}
+                      {m.is_active === false ? '退部' : `${m.grade}年`} {m.name}
                     </label>
                   ))}
                 </div>
@@ -1559,6 +1353,7 @@ export default function Home() {
             <h3 className="font-black text-lg text-slate-800">{receiptTarget ? '領収書写真の追加' : '立替金の申請'}</h3>
             <form onSubmit={handleCreateExpense}>
               <fieldset disabled={isSubmitting} className="space-y-3.5">
+              {!receiptTarget && <label className="block text-xs font-bold">領収書・購入日<input type="date" required value={expenseDate} onChange={e => setExpenseDate(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label>}
               {receiptTarget ? <p className="font-bold">{receiptTarget.title} · ¥{receiptTarget.amount.toLocaleString()}</p> : <>
               <div>
                 <label className="text-xs text-slate-600 font-bold block mb-1">用途・品名</label>
@@ -1663,6 +1458,7 @@ export default function Home() {
           <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
             <h3 className="font-black text-lg text-slate-800">部費出納の記録</h3>
             <form onSubmit={handleCreateClubTransaction}>
+              <label className="block text-xs font-bold mb-3">出納日<input type="date" required value={txDate} onChange={e => setTxDate(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label>
               <fieldset disabled={isSubmitting} className="space-y-3.5">
               <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl text-xs font-bold">
                 <button

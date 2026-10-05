@@ -1,9 +1,16 @@
+export interface RecordReview {
+  source_reference?: string | null;
+  review_note?: string | null;
+  date_provisional?: boolean;
+}
+
 export interface Member {
   id: string;
   name: string;
   grade: number;
   role: string;
   deposit_balance?: number;
+  is_active?: boolean;
 }
 
 export interface BillingEvent {
@@ -15,7 +22,7 @@ export interface BillingEvent {
   created_at?: string;
 }
 
-export interface Payment {
+export interface Payment extends RecordReview {
   id: string;
   billing_event_id: string;
   member_id: string;
@@ -23,9 +30,10 @@ export interface Payment {
   paid_amount: number;
   payment_method?: string;
   paid_at?: string | null;
+  paid_on?: string | null;
 }
 
-export interface Expense {
+export interface Expense extends RecordReview {
   id: string;
   member_id: string;
   title: string;
@@ -37,6 +45,9 @@ export interface Expense {
   reject_reason?: string;
   created_at?: string;
   settled_at?: string | null;
+  incurred_on?: string | null;
+  settled_on?: string | null;
+  settlement_provisional?: boolean;
 }
 
 export interface OffsetTransaction {
@@ -48,14 +59,15 @@ export interface OffsetTransaction {
   created_at: string;
 }
 
-export interface ClubTransaction {
+export interface ClubTransaction extends RecordReview {
   id: string;
   type: '支出' | '収入';
   title: string;
   amount: number;
   category: string;
-  payment_source: '部口座振込' | '部室現金';
+  payment_source: '部口座振込' | '部室現金' | '不明';
   event_tag?: string;
   receipt_url?: string;
   created_at?: string;
+  transaction_date?: string | null;
 }

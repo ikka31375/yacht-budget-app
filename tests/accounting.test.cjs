@@ -63,7 +63,7 @@ const base = () => ({ submittingRef: { current: false }, loading: false, dataErr
 
 test('failed club save preserves input and keeps the form open', async () => {
   const page = loadPageFunctions(['runOperation', 'handleCreateClubTransaction'], {
-    ...base(), parseAmount, txTitle: '燃料', txAmount: '3000', txType: '支出', txCategory: '燃料・交通費', txSource: '部室現金', txEventTag: '',
+    ...base(), parseAmount, parseDate: loadAccounting().parseDate, txDate:'2026-10-05', txTitle: '燃料', txAmount: '3000', txType: '支出', txCategory: '燃料・交通費', txSource: '部室現金', txEventTag: '',
     creationId: () => 'stable-id', saveClubOperation: async () => { throw new Error('保存失敗'); },
   });
   await page.functions.handleCreateClubTransaction({ preventDefault() {} });
