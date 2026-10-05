@@ -15,6 +15,8 @@ before(async () => {
   // Reapplying the migration must not reset historical data or fail.
   await db.exec(migration);
   await db.exec(guardMigration);
+  await db.exec(fs.readFileSync('supabase/migrations/202610050003_accounting_dates.sql','utf8'));
+  await db.exec(fs.readFileSync('supabase/migrations/202610050003_accounting_dates.sql','utf8'));
 });
 after(async () => { await db?.close(); });
 beforeEach(async () => {
@@ -127,4 +129,31 @@ test('snapshot includes more than 1000 records and is still governed by RLS', as
   assert.equal((await db.query('select public.get_club_accounting_snapshot() data')).rows[0].data.expenses.length, 0);
   await assert.rejects(call('create_offset', offset()), /立替が見つかりません/);
   await db.exec('reset role; drop policy deny_expenses on public.expenses; alter table public.expenses disable row level security;');
+});
+
+test('explicit dates save, invalid dates roll back, and a reset clears cash dates but preserves offsets',async()=>{
+  await assert.rejects(call('set_payment',{id:payment,expected_paid:0,clear:true,method:'振込',paid_on:'2026-02-30'}));
+  assert.equal((await balances()).paid,0);
+  await call('create_offset',offset());
+  await call('set_payment',{id:payment,expected_paid:3000,clear:true,method:'振込',paid_on:'2026-03-31'});
+  assert.equal((await db.query('select paid_on::text d from public.payments where id=$1',[payment])).rows[0].d,'2026-03-31');
+  await call('set_payment',{id:payment,expected_paid:10000,clear:false});
+  assert.equal((await balances()).paid,3000);
+  assert.equal((await db.query('select paid_on from public.payments where id=$1',[payment])).rows[0].paid_on,null);
+});
+test('editing dates rejects stale records and cannot alter the settled amount',async()=>{
+  await call('set_expense',{id:expense,expected_settled:0,clear:true,settled_on:'2026-03-31'});
+  const edit={id:expense,kind:'expense',cash_date:'2026-04-01',incurred_on:'2026-03-30',expected_cash_date:'2026-03-31',expected_incurred_on:null,expected_review_note:null,expected_settled:10000,date_provisional:false,review_note:'確認済み'};
+  await call('set_record_dates',edit);
+  await assert.rejects(call('set_record_dates',{...edit,cash_date:'2026-05-01'}),/更新/);
+  const row=(await db.query('select settled_on::text d,settled_amount,review_note from public.expenses where id=$1',[expense])).rows[0];
+  assert.equal(row.d,'2026-04-01');assert.equal(row.settled_amount,10000);assert.equal(row.review_note,'確認済み');
+});
+test('provisional settlement can be confirmed or reverted and retired members receive no new bill',async()=>{
+  await db.exec(`reset role; update public.expenses set settled_amount=10000,status='精算済',settlement_provisional=true; update public.members set is_active=false; set role anon;`);
+  await call('confirm_import_settlement',{id:expense,expected_settled:10000});
+  assert.equal((await db.query('select settlement_provisional b from public.expenses')).rows[0].b,false);
+  await call('set_expense',{id:expense,expected_settled:10000,clear:false});
+  assert.equal((await balances()).settled,0);
+  await assert.rejects(call('create_billing',{id:randomUUID(),title:'部費',amount:8000,due_date:'2026-11-01',member_ids:[member]}),/退部/);
 });
