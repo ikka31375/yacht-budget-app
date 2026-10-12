@@ -6,6 +6,9 @@ import { Member, Payment, Expense, BillingEvent, ClubTransaction, OffsetTransact
 import { calculateAccounting, createCsv, errorMessage, japanDate, MAX_AMOUNT, parseAmount, parseDate, paymentDate, expenseSettlementDate, transactionDate, type CashEntry } from '@/lib/accounting';
 import AccountingReport from '@/components/AccountingReport';
 import RecordDateEditor, {type DateEditTarget} from '@/components/RecordDateEditor';
+import DuesOverview from '@/components/DuesOverview';
+import BillingManager, {AddBillingMembers, type BillingSave} from '@/components/BillingManager';
+import {billingKind, duesMonth, eligibleMembers} from '@/lib/dues';
 import { fetchClubData, saveClubOperation } from '@/lib/data';
 
 // 洗練された大分類カテゴリ（固定）
@@ -24,7 +27,11 @@ const INCOME_CATEGORIES = [
 ];
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState<'personal' | 'club' | 'members'>('personal');
+  const [activeTab, setActiveTab] = useState<'personal' | 'club' | 'members' | 'dues'>('personal');
+  const [billingAddTarget, setBillingAddTarget] = useState<{event:BillingEvent;member?:Member}|null>(null);
+  const [eventKind, setEventKind] = useState<'dues'|'other'>('dues');
+  const [eventMonth, setEventMonth] = useState(japanDate().slice(0,7));
+  const [paymentKindFilter, setPaymentKindFilter] = useState<'dues'|'other'|'all'>('all');
   const [members, setMembers] = useState<Member[]>([]);
   const [selectedMemberId, setSelectedMemberId] = useState<string>('');
   const [payments, setPayments] = useState<Payment[]>([]);
@@ -162,6 +169,13 @@ export default function Home() {
   const accounting = calculateAccounting({ members, payments, expenses, events, clubTransactions, offsetTransactions });
   const activeMembers = members.filter(m => m.is_active !== false);
   const actionsDisabled = loading || isSubmitting || !!dataError || accounting.issues.length > 0;
+  const clubData = {members,payments,expenses,events,clubTransactions,offsetTransactions};
+  const billingCandidates = eligibleMembers(activeMembers,payments,events,{id:'new',title:eventTitle,amount:0,due_date:'',billing_kind:eventKind,billing_month:eventKind==='dues'?`${eventMonth}-01`:null});
+  const openCreateBilling = (kind:'dues'|'other', month=japanDate().slice(0,7)) => {
+    delete creationIdsRef.current.billing;
+    setEventKind(kind); setEventMonth(month); setEventTitle(kind==='dues'?`${month.slice(0,4)}年${Number(month.slice(5,7))}月部費`:'');
+    setEventAmount(''); setEventDueDate(''); setTargetMemberIds([]); setShowEventManageModal(false); setShowEventModal(true);
+  };
 
   const runOperation = async (action: () => Promise<void>) => {
     if (submittingRef.current || loading || dataError || accounting.issues.length > 0) return;
@@ -181,6 +195,9 @@ export default function Home() {
   const creationId = (operation: string) => {
     creationIdsRef.current[operation] ||= crypto.randomUUID();
     return creationIdsRef.current[operation];
+  };
+  const saveBilling:BillingSave = (operation,payload,done) => {
+    void runOperation(async()=>{await saveClubOperation(operation,payload);done();});
   };
 
   // Revoke temporary image URLs on every success/error path.
@@ -268,8 +285,10 @@ export default function Home() {
     await runOperation(async () => {
       const amount = parseAmount(eventAmount);
       if (!eventTitle.trim() || targetMemberIds.length === 0) throw new Error('請求名と対象部員を入力してください。');
+      if (targetMemberIds.some(id=>!billingCandidates.some(m=>m.id===id))) throw new Error('対象部員を選び直してください。同じ月の請求または対象外の設定があります。');
       await saveClubOperation('create_billing', {
         id: creationId('billing'), title: eventTitle.trim(), amount,
+        billing_kind: eventKind, billing_month: eventKind==='dues'?duesMonth(eventMonth).slice(0,7):null,
         due_date: eventDueDate || japanDate(), member_ids: targetMemberIds,
       });
       delete creationIdsRef.current.billing;
@@ -539,7 +558,7 @@ export default function Home() {
                 {currentMember ? (
                   <div className="grid grid-cols-2 gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                     <div className="bg-red-50 p-3.5 rounded-xl border border-red-100">
-                      <span className="text-xs sm:text-sm text-red-600 font-bold block mb-1">未納部費</span>
+                      <span className="text-xs sm:text-sm text-red-600 font-bold block mb-1">未納の請求</span>
                       <span className="text-xl sm:text-2xl font-black text-red-700 tabular-nums">
                         ¥{getUnpaidTotal(currentMember.id).toLocaleString()}
                       </span>
@@ -580,8 +599,7 @@ export default function Home() {
                   <button
                     disabled={actionsDisabled}
                     onClick={() => {
-                      setTargetMemberIds(activeMembers.map((m) => m.id));
-                      setShowEventModal(true);
+                      openCreateBilling('dues');
                     }}
                     className="p-4 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
                   >
@@ -619,8 +637,10 @@ export default function Home() {
                       </div>
                     </div>
 
+                    <div className="flex gap-2 text-xs font-bold">{(['all','dues','other'] as const).map(kind=><button key={kind} onClick={()=>setPaymentKindFilter(kind)} className={`px-3 py-2 rounded-lg ${paymentKindFilter===kind?'bg-blue-50 text-blue-700':'text-slate-500'}`}>{kind==='all'?'すべて':kind==='dues'?'毎月の部費':'その他の請求'}</button>)}</div>
                     {payments
                       .filter((p) => !currentMember || p.member_id === currentMember.id)
+                          .filter(p=>paymentKindFilter==='all'||billingKind(events.find(e=>e.id===p.billing_event_id)!)===paymentKindFilter)
                       .filter((p) => {
                         if (paymentFilter === 'unpaid') return p.status !== '支払済';
                         if (paymentFilter === 'paid') return p.status === '支払済';
@@ -631,6 +651,7 @@ export default function Home() {
                     ) : (
                       payments
                         .filter((p) => !currentMember || p.member_id === currentMember.id)
+                          .filter(p=>paymentKindFilter==='all'||billingKind(events.find(e=>e.id===p.billing_event_id)!)===paymentKindFilter)
                         .filter((p) => {
                           if (paymentFilter === 'unpaid') return p.status !== '支払済';
                           if (paymentFilter === 'paid') return p.status === '支払済';
@@ -878,6 +899,8 @@ export default function Home() {
             )}
 
             {/* TAB 2: 全体会計 */}
+            {activeTab === 'dues' && <DuesOverview data={clubData} disabled={actionsDisabled} onManage={()=>setShowEventManageModal(true)} onCreate={month=>openCreateBilling('dues',month)} onAdd={(event,member)=>setBillingAddTarget({event,member})} onPay={payment=>{setPaidOn(japanDate());setConfirmPaymentTarget(payment);}} onRemove={payment=>void handleDeleteIndividualPayment(payment)} onSave={saveBilling}/>}
+
             {activeTab === 'club' && <AccountingReport data={{members,payments,expenses,events,clubTransactions,offsetTransactions}} disabled={actionsDisabled} onCreate={() => {setTxDate(japanDate());setShowClubTxModal(true);}} onEdit={editCashEntry} onConfirm={confirmImportedSettlement} onRevert={id => {const record = expenses.find(e => e.id === id);if(record) void handleRevertExpense(record);}}/>}
 
             {/* TAB 3: 部員一覧 */}
@@ -914,7 +937,7 @@ export default function Home() {
 
                         <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-100 text-center">
                           <div className="bg-slate-50 p-2.5 rounded-xl">
-                            <span className="text-xs text-slate-400 block font-medium">未納部費</span>
+                            <span className="text-xs text-slate-400 block font-medium">未納の請求</span>
                             <span
                               className={`text-sm sm:text-base font-bold tabular-nums ${
                                 unpaid > 0 ? 'text-red-600' : 'text-slate-400'
@@ -946,7 +969,7 @@ export default function Home() {
 
       {/* ボトムナビ */}
       <nav className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-slate-200 shadow-2xl">
-        <div className="max-w-md mx-auto grid grid-cols-3 h-16">
+        <div className="max-w-md mx-auto grid grid-cols-4 h-16">
           <button
             onClick={() => setActiveTab('personal')}
             className={`flex flex-col items-center justify-center gap-1 transition ${
@@ -965,6 +988,7 @@ export default function Home() {
             <span className="text-2xl">📊</span>
             <span className="text-xs">全体会計</span>
           </button>
+          <button onClick={()=>setActiveTab('dues')} className={`flex flex-col items-center justify-center gap-1 ${activeTab==='dues'?'text-blue-600 font-black':'text-slate-400 font-medium'}`}><span className="text-2xl">📅</span><span className="text-xs">部費一覧</span></button>
           <button
             onClick={() => setActiveTab('members')}
             className={`flex flex-col items-center justify-center gap-1 transition ${
@@ -977,75 +1001,8 @@ export default function Home() {
         </div>
       </nav>
 
-      {/* モーダル: 請求イベント管理 */}
-      {showEventManageModal && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-5 w-full max-w-md space-y-4 max-h-[85vh] overflow-y-auto shadow-2xl">
-            <div className="flex justify-between items-center border-b pb-3">
-              <div>
-                <h3 className="font-black text-base text-slate-800">請求イベント管理</h3>
-                <p className="text-xs text-slate-400">作成した部費・集金イベントの確認と削除</p>
-              </div>
-              <button onClick={() => setShowEventManageModal(false)} className="text-slate-400 font-bold text-lg">
-                ✕
-              </button>
-            </div>
-
-            {events.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-6">作成された請求はありません</p>
-            ) : (
-              <div className="space-y-3">
-                {events.map((ev) => {
-                  const evPayments = payments.filter((p) => p.billing_event_id === ev.id);
-                  const paidCount = evPayments.filter((p) => p.status === '支払済' || p.status === '一部納入' || (p.paid_amount || 0) > 0).length;
-                  const canDelete = paidCount === 0 && !offsetTransactions.some(o => evPayments.some(p => p.id === o.payment_id));
-
-                  return (
-                    <div key={ev.id} className="p-4 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <p className="font-bold text-sm text-slate-900">{ev.title}</p>
-                          <p className="text-xs text-slate-500 mt-0.5">
-                            期日: {ev.due_date} | 請求対象: {evPayments.length}名
-                          </p>
-                        </div>
-                        <span className="text-sm font-black text-slate-800 tabular-nums">
-                          ¥{ev.amount.toLocaleString()}
-                        </span>
-                      </div>
-
-                      <div className="flex justify-between items-center pt-2 border-t border-slate-200">
-                        <span className={`text-xs font-bold ${canDelete ? 'text-slate-500' : 'text-emerald-700'}`}>
-                          {canDelete ? '未納 100% (削除可)' : `${paidCount}名が納入・相殺済`}
-                        </span>
-
-                        <button
-                          onClick={() => handleDeleteBillingEvent(ev)}
-                          disabled={!canDelete || actionsDisabled}
-                          className={`px-3 py-1.5 rounded-xl text-xs font-bold transition flex items-center gap-1 ${
-                            canDelete
-                              ? 'bg-rose-50 hover:bg-rose-100 text-rose-600 border border-rose-200'
-                              : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-                          }`}
-                        >
-                          <span>🗑️</span> 請求を削除
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            <button
-              onClick={() => setShowEventManageModal(false)}
-              className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm rounded-xl"
-            >
-              閉じる
-            </button>
-          </div>
-        </div>
-      )}
+      {showEventManageModal && <BillingManager data={clubData} disabled={actionsDisabled} onClose={()=>setShowEventManageModal(false)} onAdd={event=>setBillingAddTarget({event})} onDelete={event=>void handleDeleteBillingEvent(event)} onSave={saveBilling} onCreate={kind=>openCreateBilling(kind)}/>}
+      {billingAddTarget && <AddBillingMembers key={billingAddTarget.event.id} data={clubData} event={billingAddTarget.event} initialMember={billingAddTarget.member} disabled={actionsDisabled} onClose={()=>setBillingAddTarget(null)} onSave={saveBilling}/>}
 
       {/* モーダル: 相殺履歴一覧 */}
       {showOffsetHistoryModal && (
@@ -1268,6 +1225,8 @@ export default function Home() {
             <h3 className="font-black text-lg text-slate-800">新規請求の作成</h3>
             <form onSubmit={handleCreateBillingEvent}>
               <fieldset disabled={isSubmitting} className="space-y-3.5">
+              <label className="block text-xs font-bold">請求の種類<select value={eventKind} onChange={e=>{setEventKind(e.target.value as 'dues'|'other');setTargetMemberIds([]);}} className="w-full block p-3 border rounded-xl mt-1 text-sm"><option value="dues">毎月の部費</option><option value="other">その他の請求（合宿費・遠征費など）</option></select></label>
+              {eventKind==='dues'&&<label className="block text-xs font-bold">何月分の部費か<input type="month" required value={eventMonth} onChange={e=>{setEventMonth(e.target.value);setTargetMemberIds([]);setEventTitle(`${e.target.value.slice(0,4)}年${Number(e.target.value.slice(5,7))}月部費`);}} className="w-full block p-3 border rounded-xl mt-1 text-sm"/><span className="block text-slate-500 font-normal mt-1">実際の入金日は、納入を登録するときに指定します。</span></label>}
               <div>
                 <label className="text-xs text-slate-600 font-bold block mb-1">請求タイトル</label>
                 <input
@@ -1308,8 +1267,8 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => {
-                      if (targetMemberIds.length === activeMembers.length) setTargetMemberIds([]);
-                      else setTargetMemberIds(activeMembers.map((m) => m.id));
+                      if (targetMemberIds.length === billingCandidates.length) setTargetMemberIds([]);
+                      else setTargetMemberIds(billingCandidates.map((m) => m.id));
                     }}
                     className="text-xs text-blue-600 underline font-bold"
                   >
@@ -1317,7 +1276,8 @@ export default function Home() {
                   </button>
                 </div>
                 <div className="max-h-32 overflow-y-auto border border-slate-100 rounded-xl p-2 space-y-1 bg-slate-50">
-                  {activeMembers.map((m) => (
+                  {billingCandidates.length===0&&<p className="p-2 text-xs text-slate-500">選択できる部員はいません。同月に登録済みの人・対象外の人は除いています。</p>}
+                  {billingCandidates.map((m) => (
                     <label key={m.id} className="flex items-center gap-2 text-xs text-slate-700 cursor-pointer p-1">
                       <input
                         type="checkbox"

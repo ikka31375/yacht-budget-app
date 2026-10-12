@@ -41,6 +41,8 @@ export async function fetchClubData(): Promise<ClubData> {
 }
 
 export async function saveClubOperation(operation: string, payload: Record<string, unknown>) {
-  const { error } = await supabase.rpc('apply_club_accounting_operation', { p_operation: operation, p_payload: payload });
+  const billing = ['create_billing', 'add_billing_members', 'classify_billing', 'set_dues_exclusion'].includes(operation);
+  const { error } = await supabase.rpc(billing ? 'apply_club_billing_operation' : 'apply_club_accounting_operation', { p_operation: operation, p_payload: payload });
+  if (billing && error?.code === 'PGRST202') throw new Error('部費管理の更新が準備中です。しばらくして画面を更新してください。');
   if (error) throw error;
 }
