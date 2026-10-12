@@ -5,6 +5,7 @@ export interface RecordReview {
 }
 
 export interface Member {
+  dues_excluded_months?: Record<string, string>;
   id: string;
   name: string;
   grade: number;
@@ -14,6 +15,8 @@ export interface Member {
 }
 
 export interface BillingEvent {
+  billing_kind?: 'dues' | 'other';
+  billing_month?: string | null;
   id: string;
   title: string;
   amount: number;
@@ -23,6 +26,7 @@ export interface BillingEvent {
 }
 
 export interface Payment extends RecordReview {
+  dues_month?: string | null;
   id: string;
   billing_event_id: string;
   member_id: string;
