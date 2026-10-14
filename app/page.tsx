@@ -89,6 +89,7 @@ export default function Home() {
   const [txCategory, setTxCategory] = useState(EXPENSE_CATEGORIES[0]);
   const [txSource, setTxSource] = useState<ClubTransaction['payment_source']>('部口座振込');
   const [txEventTag, setTxEventTag] = useState('');
+  const [txNote, setTxNote] = useState('');
 
   // フォーム: 相殺（自動MAX初期値）
   const [selectedExpenseForOffset, setSelectedExpenseForOffset] = useState<Expense | null>(null);
@@ -337,10 +338,10 @@ export default function Home() {
       if (!txTitle.trim()) throw new Error('品名・内容を入力してください。');
       await saveClubOperation('create_club_transaction', {
         id: creationId('club'), type: txType, title: txTitle.trim(), amount,
-        transaction_date: parseDate(txDate), category: txCategory, payment_source: txSource, event_tag: txEventTag.trim() || null,
+        transaction_date: parseDate(txDate), category: txCategory, payment_source: txSource, event_tag: txEventTag.trim() || null, review_note: txNote.trim() || null,
       });
       delete creationIdsRef.current.club;
-      setTxTitle(''); setTxAmount(''); setTxEventTag(''); setShowClubTxModal(false);
+      setTxTitle(''); setTxAmount(''); setTxEventTag(''); setTxNote(''); setShowClubTxModal(false);
     });
   };
 
@@ -410,7 +411,7 @@ export default function Home() {
   // CSVダウンロード
   const exportToCSV = () => {
     if (actionsDisabled) return;
-    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額/充当額', '残額', '状態', '日付（請求は期日・他は登録日）', '相殺額', '現金納入/精算額', '現金納入/精算日'];
+    const header = ['分類', '項目', '対象者/出納元', '品名・使途', '金額', '既納額/充当額', '残額', '状態', '日付（請求は期日・他は登録日）', '相殺額', '現金納入/精算額', '現金納入/精算日', 'メモ'];
     const rows: string[][] = [];
 
     payments.forEach((p) => {
@@ -429,7 +430,7 @@ export default function Home() {
         `${p.status} (${p.payment_method || ''})`,
         ev?.due_date || '',
         String(accounting.paymentOffsets[p.id] || 0), String(accounting.cashPayments[p.id] || 0),
-        paymentDate(p) || '',
+        paymentDate(p) || '', p.review_note || '',
       ]);
     });
 
@@ -444,7 +445,7 @@ export default function Home() {
         '-',
         t.type,
         transactionDate(t) || '',
-        '0', String(t.amount), transactionDate(t) || '',
+        '0', String(t.amount), transactionDate(t) || '', t.review_note || '',
       ]);
     });
 
@@ -463,7 +464,7 @@ export default function Home() {
         `${e.status} ${e.reject_reason || ''}`,
         e.created_at ? japanDate(new Date(e.created_at)) : '',
         String(accounting.expenseOffsets[e.id] || 0), String(accounting.cashExpenses[e.id] || 0),
-        expenseSettlementDate(e) || '',
+        expenseSettlementDate(e) || '', e.review_note || '',
       ]);
     });
 
@@ -484,51 +485,8 @@ export default function Home() {
     <div className="min-h-screen bg-slate-100 text-slate-800 pb-28 text-sm">
       {/* ヘッダー */}
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur border-b border-slate-200 px-4 py-3">
-        <div className="w-full flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-          <div className="flex justify-between items-center">
-            <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2">
-              <span>⛵</span> ヨット部 会計
-            </h1>
-            <div className="flex gap-2">
-              <button
-                onClick={() => setShowEventManageModal(true)}
-                disabled={actionsDisabled}
-                className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 px-3 py-1.5 rounded-xl font-bold transition"
-              >
-                請求管理
-              </button>
-              <button
-                onClick={() => setShowOffsetHistoryModal(true)}
-                disabled={actionsDisabled}
-                className="text-xs sm:text-sm bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-xl font-bold transition"
-              >
-                相殺履歴
-              </button>
-              <button
-                onClick={exportToCSV}
-                disabled={actionsDisabled}
-                className="text-xs sm:text-sm bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl text-slate-700 font-bold transition"
-              >
-                CSV
-              </button>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-slate-600 font-bold shrink-0">部員:</span>
-            <select
-              value={selectedMemberId}
-              onChange={(e) => handleMemberChange(e.target.value)}
-              className="w-full md:w-64 p-2.5 border border-slate-300 rounded-xl bg-white text-sm font-bold text-slate-800 shadow-sm"
-            >
-              <option value="">-- 全体 --</option>
-              {activeMembers.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.is_active === false ? '退部' : `${m.grade}年`} {m.name} ({m.role})
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="max-w-7xl mx-auto">
+          <h1 className="text-xl font-black text-slate-900 tracking-tight flex items-center gap-2"><span>⛵</span> ヨット部 会計</h1>
         </div>
       </header>
 
@@ -555,6 +513,21 @@ export default function Home() {
             {/* TAB 1: マイページ / 個人 */}
             {activeTab === 'personal' && (
               <div className="space-y-4">
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-slate-600 font-bold shrink-0">部員:</span>
+            <select
+              value={selectedMemberId}
+              onChange={(e) => handleMemberChange(e.target.value)}
+              className="w-full md:w-64 p-2.5 border border-slate-300 rounded-xl bg-white text-sm font-bold text-slate-800 shadow-sm"
+            >
+              <option value="">-- 全体 --</option>
+              {activeMembers.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.is_active === false ? '退部' : `${m.grade}年`} {m.name} ({m.role})
+                </option>
+              ))}
+            </select>
+          </div>
                 {currentMember ? (
                   <div className="grid grid-cols-2 gap-3 bg-white p-4 rounded-2xl border border-slate-200 shadow-sm">
                     <div className="bg-red-50 p-3.5 rounded-xl border border-red-100">
@@ -576,36 +549,13 @@ export default function Home() {
                   </div>
                 )}
 
-                {/* ボタン */}
-                <div className="grid grid-cols-2 gap-3">
-                  {currentMember ? (
-                    <button
-                      onClick={() => { setExpenseDate(japanDate()); setReceiptTarget(null); clearSelectedFile(); setShowExpenseModal(true); }}
-                      disabled={actionsDisabled || currentMember.is_active === false}
-                      className="p-4 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
-                    >
-                      <span>📸</span> 立替を申請
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => {setTxDate(japanDate());setShowClubTxModal(true);}}
-                      disabled={actionsDisabled}
-                      className="p-4 bg-emerald-700 hover:bg-emerald-800 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
-                    >
-                      <span>💸</span> 部費の出納を記録
-                    </button>
-                  )}
-
+                {currentMember && (
                   <button
-                    disabled={actionsDisabled}
-                    onClick={() => {
-                      openCreateBilling('dues');
-                    }}
-                    className="p-4 bg-slate-900 hover:bg-black active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
-                  >
-                    <span>📋</span> 請求を作成
-                  </button>
-                </div>
+                    onClick={() => { setExpenseDate(japanDate()); setReceiptTarget(null); clearSelectedFile(); setShowExpenseModal(true); }}
+                    disabled={actionsDisabled || currentMember.is_active === false}
+                    className="w-full p-4 bg-blue-600 hover:bg-blue-700 active:scale-[0.98] text-white rounded-2xl font-bold text-sm shadow-md transition flex items-center justify-center gap-2"
+                  ><span>📸</span> 立替を申請</button>
+                )}
 
                 {/* 一覧 */}
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -720,10 +670,11 @@ export default function Home() {
 
                   {/* 立替一覧 */}
                   <section className="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <div className="flex justify-between items-center">
+                    <div className="flex flex-wrap justify-between items-center gap-2">
                       <h2 className="font-black text-sm text-slate-600 uppercase">
                         {currentMember ? `${currentMember.name}の立替` : '立替一覧'}
                       </h2>
+                      <button onClick={()=>setShowOffsetHistoryModal(true)} disabled={actionsDisabled} className="text-xs bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 px-3 py-1.5 rounded-xl font-bold">相殺履歴</button>
                       <div className="flex bg-slate-100 p-0.5 rounded-lg text-xs font-bold">
                         <button
                           onClick={() => setExpenseFilter('unsettled')}
@@ -901,7 +852,7 @@ export default function Home() {
             {/* TAB 2: 全体会計 */}
             {activeTab === 'dues' && <DuesOverview data={clubData} disabled={actionsDisabled} onManage={()=>setShowEventManageModal(true)} onCreate={month=>openCreateBilling('dues',month)} onAdd={(event,member)=>setBillingAddTarget({event,member})} onPay={payment=>{setPaidOn(japanDate());setConfirmPaymentTarget(payment);}} onRemove={payment=>void handleDeleteIndividualPayment(payment)} onSave={saveBilling}/>}
 
-            {activeTab === 'club' && <AccountingReport data={{members,payments,expenses,events,clubTransactions,offsetTransactions}} disabled={actionsDisabled} onCreate={() => {setTxDate(japanDate());setShowClubTxModal(true);}} onEdit={editCashEntry} onConfirm={confirmImportedSettlement} onRevert={id => {const record = expenses.find(e => e.id === id);if(record) void handleRevertExpense(record);}}/>}
+            {activeTab === 'club' && <AccountingReport onExportAll={exportToCSV} data={{members,payments,expenses,events,clubTransactions,offsetTransactions}} disabled={actionsDisabled} onCreate={() => {setTxDate(japanDate());setShowClubTxModal(true);}} onEdit={editCashEntry} onConfirm={confirmImportedSettlement} onRevert={id => {const record = expenses.find(e => e.id === id);if(record) void handleRevertExpense(record);}}/>}
 
             {/* TAB 3: 部員一覧 */}
             {activeTab === 'members' && (
@@ -1309,7 +1260,7 @@ export default function Home() {
       {/* モーダル: 立替申請 */}
       {showExpenseModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
+          <div className="bg-white rounded-3xl p-5 w-full max-w-sm min-w-0 max-h-[calc(100dvh-2rem)] overflow-y-auto space-y-4 shadow-2xl">
             <h3 className="font-black text-lg text-slate-800">{receiptTarget ? '領収書写真の追加' : '立替金の申請'}</h3>
             <form onSubmit={handleCreateExpense}>
               <fieldset disabled={isSubmitting} className="space-y-3.5">
@@ -1415,11 +1366,11 @@ export default function Home() {
       {/* モーダル: 部費出納 */}
       {showClubTxModal && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-3xl p-5 w-full max-w-sm space-y-4 shadow-2xl">
+          <div role="dialog" aria-modal="true" aria-label="部費出納の記録" className="bg-white rounded-3xl p-5 w-full max-w-sm min-w-0 max-h-[calc(100dvh-2rem)] overflow-y-auto space-y-4 shadow-2xl">
             <h3 className="font-black text-lg text-slate-800">部費出納の記録</h3>
             <form onSubmit={handleCreateClubTransaction}>
-              <label className="block text-xs font-bold mb-3">出納日<input type="date" required value={txDate} onChange={e => setTxDate(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label>
               <fieldset disabled={isSubmitting} className="space-y-3.5">
+              <label className="block text-xs font-bold mb-3">出納日<input type="date" required value={txDate} onChange={e => setTxDate(e.target.value)} className="block w-full p-3 border rounded-xl mt-1"/></label>
               <div className="grid grid-cols-2 gap-2 bg-slate-100 p-1 rounded-xl text-xs font-bold">
                 <button
                   type="button"
@@ -1508,6 +1459,10 @@ export default function Home() {
                   />
                 </div>
               </div>
+
+              <label className="block text-xs text-slate-600 font-bold">メモ（任意）
+                <textarea rows={3} maxLength={2000} value={txNote} onChange={e=>setTxNote(e.target.value)} placeholder="補足や確認事項など" className="block w-full min-w-0 p-3 mt-1 border border-slate-200 rounded-xl text-sm"/>
+              </label>
 
               <div className="flex gap-2 pt-2">
                 <button type="button" onClick={() => setShowClubTxModal(false)} className="flex-1 py-3 text-xs font-bold border rounded-xl">
