@@ -3,9 +3,10 @@
 import { useState } from 'react';
 import { cashEntries, createCsv, fiscalYear, japanDate, periodBounds, summarizeEntries, type CashEntry, type ClubData } from '@/lib/accounting';
 
-export default function AccountingReport({data, disabled, onCreate, onEdit, onRevert, onConfirm}: {
+export default function AccountingReport({data, disabled, onCreate, onEdit, onRevert, onConfirm, onExportAll}: {
   data: ClubData; disabled: boolean; onCreate: () => void; onEdit: (entry: CashEntry) => void;
   onRevert: (id: string) => void; onConfirm: (id: string) => void;
+  onExportAll: () => void;
 }) {
   const [mode,setMode] = useState<'all' | 'month' | 'year'>('all');
   const [month,setMonth] = useState(japanDate().slice(0,7));
@@ -37,11 +38,11 @@ export default function AccountingReport({data, disabled, onCreate, onEdit, onRe
     <section className="bg-white p-4 rounded-2xl border border-slate-200 space-y-3">
       <div className="flex flex-wrap justify-between gap-2 items-center">
         <h2 className="font-black text-lg">会計の期間</h2>
-        <button disabled={disabled} onClick={exportPeriod} className="border rounded-lg px-3 py-2 text-xs font-bold">表示期間をCSVにする</button>
+        <details className="relative text-xs font-bold"><summary className="border rounded-lg px-3 py-2 cursor-pointer">CSV</summary><div className="absolute right-0 z-10 mt-2 w-56 max-w-[calc(100vw-4rem)] rounded-xl border border-slate-200 bg-white p-2 shadow-lg space-y-1"><button disabled={disabled} onClick={exportPeriod} className="w-full rounded-lg px-3 py-2 text-left hover:bg-slate-100">表示期間をCSVにする</button><button disabled={disabled} onClick={onExportAll} className="w-full rounded-lg px-3 py-2 text-left hover:bg-slate-100">全期間の会計データをCSVにする</button></div></details>
       </div>
       <div className="flex flex-wrap gap-2 items-center">
         {(['all','month','year'] as const).map((m,i)=><button key={m} onClick={()=>setMode(m)} aria-pressed={mode===m} className={`rounded-xl px-4 py-2 font-bold ${mode===m?'bg-slate-900 text-white':'bg-slate-100'}`}>{['全期間','月別','年度別'][i]}</button>)}
-        {mode==='month' && <label className="text-xs">対象月 <input aria-label="集計対象月" type="month" required value={month} onChange={e=>{if(e.target.value)setMonth(e.target.value);}} className="border rounded-lg p-2"/></label>}
+        {mode==='month' && <label className="text-xs w-full min-w-0 sm:w-auto">対象月 <input aria-label="集計対象月" type="month" required value={month} onChange={e=>{if(e.target.value)setMonth(e.target.value);}} className="border rounded-lg p-2"/></label>}
         {mode==='year' && <label className="text-xs">対象年度 <select aria-label="集計対象年度" value={year} onChange={e=>setYear(e.target.value)} className="border rounded-lg p-2">{years.map(y=><option key={y} value={y}>{y}年度</option>)}</select></label>}
       </div>
       <p className="text-xs text-slate-500">納入日・立替精算日・出納日で集計します。年度は4月1日〜翌年3月31日です。</p>
