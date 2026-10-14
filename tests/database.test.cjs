@@ -17,10 +17,12 @@ before(async () => {
   await db.exec(guardMigration);
   await db.exec(fs.readFileSync('supabase/migrations/202610050003_accounting_dates.sql','utf8'));
   await db.exec(fs.readFileSync('supabase/migrations/202610050003_accounting_dates.sql','utf8'));
+  await db.exec(fs.readFileSync('supabase/migrations/202610140005_cash_notes.sql','utf8'));
+  await db.exec(fs.readFileSync('supabase/migrations/202610140005_cash_notes.sql','utf8'));
 });
 after(async () => { await db?.close(); });
 beforeEach(async () => {
-  await db.exec('reset role; drop trigger if exists fail_expense_write on public.expenses; drop trigger if exists fail_payment_insert on public.payments;');
+  await db.exec('reset role; drop trigger if exists fail_expense_write on public.expenses; drop trigger if exists fail_payment_insert on public.payments; drop trigger if exists fail_club_note_write on public.club_transactions;');
   await db.exec('truncate public.offset_transactions, public.payments, public.expenses, public.club_transactions, public.billing_events, public.members;');
   member = randomUUID(); event = randomUUID(); payment = randomUUID(); expense = randomUUID();
   await db.query('insert into public.members(id,name,grade,role) values ($1,$2,2,$3)', [member, 'テスト部員', '部員']);
@@ -30,6 +32,8 @@ beforeEach(async () => {
   await db.exec('set role anon');
 });
 const call = (operation, payload) => db.query('select public.apply_club_accounting_operation($1,$2::jsonb)', [operation, JSON.stringify(payload)]);
+const cashCall = payload => db.query('select public.apply_club_cash_operation($1,$2::jsonb)', ['create_club_transaction', JSON.stringify(payload)]);
+const cashPayload = () => ({id:randomUUID(),title:'燃料',amount:3000,type:'支出',category:'燃料・交通費',payment_source:'部室現金',transaction_date:'2026-10-14',review_note:'補足「A」, #1\n領収書を確認済み'});
 const offset = (id = randomUUID(), amount = 3000, expected_paid = 0, expected_settled = 0) => ({ id, amount, payment_id: payment, expense_id: expense, expected_paid, expected_settled });
 const balances = async () => {
   const result = await db.query('select (select paid_amount from public.payments where id=$1) paid, (select settled_amount from public.expenses where id=$2) settled, (select count(*)::integer from public.offset_transactions) offsets', [payment, expense]);
@@ -43,6 +47,37 @@ test('offset and cancellation atomically update both balances and the ledger', a
   assert.deepEqual(await balances(), { paid: 0, settled: 0, offsets: 0 });
   await call('cancel_offset', { id: payload.id });
   assert.deepEqual(await balances(), { paid: 0, settled: 0, offsets: 0 });
+});
+
+test('cash notes persist exactly once with the date and amount, and changed retries cannot overwrite them',async()=>{
+  const payload=cashPayload();
+  await cashCall(payload);await cashCall(payload);
+  const rows=(await db.query('select id,amount,transaction_date::text as cash_date,review_note from public.club_transactions')).rows;
+  assert.equal(rows.length,1);assert.equal(rows[0].amount,3000);assert.equal(rows[0].cash_date,'2026-10-14');assert.equal(rows[0].review_note,payload.review_note);
+  await assert.rejects(cashCall({...payload,review_note:'違うメモ'}),/前回の出納/);
+  await assert.rejects(cashCall({...payload,amount:4000}),/前回の出納/);
+  assert.equal((await db.query('select review_note from public.club_transactions')).rows[0].review_note,payload.review_note);
+});
+
+test('failure saving a note rolls back the cash record too',async()=>{
+  await db.exec(`reset role; create or replace function public.fail_test_write() returns trigger language plpgsql as $$ begin raise exception 'forced note failure'; end $$;
+    create trigger fail_club_note_write before update of review_note on public.club_transactions for each row execute function public.fail_test_write(); set role anon;`);
+  await assert.rejects(cashCall(cashPayload()),/forced note failure/);
+  assert.equal((await db.query('select count(*)::integer n from public.club_transactions')).rows[0].n,0);
+});
+
+test('empty notes remain optional; invalid notes cannot create a cash entry',async()=>{
+  for(const review_note of ['x'.repeat(2001),{text:'不正'}]) await assert.rejects(cashCall({...cashPayload(),review_note}),/メモ/);
+  await cashCall({...cashPayload(),review_note:'   '});
+  await cashCall({...cashPayload(),review_note:undefined});
+  assert((await db.query('select review_note from public.club_transactions')).rows.every(row=>row.review_note===null));
+});
+
+test('reapplying the notes migration leaves all existing financial and note records intact',async()=>{
+  await cashCall(cashPayload());
+  const before=(await db.query('select public.get_club_accounting_snapshot() data')).rows[0].data;
+  await db.exec('reset role');await db.exec(fs.readFileSync('supabase/migrations/202610140005_cash_notes.sql','utf8'));await db.exec('set role anon');
+  assert.deepEqual((await db.query('select public.get_club_accounting_snapshot() data')).rows[0].data,before);
 });
 
 test('failure after the first balance write rolls back the ledger and both balances', async () => {

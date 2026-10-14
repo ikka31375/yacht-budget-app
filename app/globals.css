@@ -24,3 +24,31 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Native date controls must shrink inside narrow forms, including WebKit. */
+fieldset {
+  min-inline-size: 0;
+}
+
+input[type="date"],
+input[type="month"] {
+  display: block;
+  box-sizing: border-box;
+  inline-size: 100%;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+  min-block-size: 2.75rem;
+  font-size: 1rem;
+}
+
+input[type="date"]::-webkit-datetime-edit,
+input[type="month"]::-webkit-datetime-edit {
+  min-inline-size: 0;
+  padding: 0;
+}
+
+input[type="date"]::-webkit-date-and-time-value,
+input[type="month"]::-webkit-date-and-time-value {
+  min-inline-size: 0;
+  text-align: left;
+}

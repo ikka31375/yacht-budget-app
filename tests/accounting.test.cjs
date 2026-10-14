@@ -63,14 +63,31 @@ const base = () => ({ submittingRef: { current: false }, loading: false, dataErr
 
 test('failed club save preserves input and keeps the form open', async () => {
   const page = loadPageFunctions(['runOperation', 'handleCreateClubTransaction'], {
-    ...base(), parseAmount, parseDate: loadAccounting().parseDate, txDate:'2026-10-05', txTitle: '燃料', txAmount: '3000', txType: '支出', txCategory: '燃料・交通費', txSource: '部室現金', txEventTag: '',
+    ...base(), parseAmount, parseDate: loadAccounting().parseDate, txDate:'2026-10-05', txTitle: '燃料', txAmount: '3000', txType: '支出', txCategory: '燃料・交通費', txSource: '部室現金', txEventTag: '', txNote: '領収書を後日確認',
     creationId: () => 'stable-id', saveClubOperation: async () => { throw new Error('保存失敗'); },
   });
   await page.functions.handleCreateClubTransaction({ preventDefault() {} });
   assert.equal(page.alerts[0], '保存失敗');
   assert(!Object.hasOwn(page.state, 'setTxTitle'));
   assert(!Object.hasOwn(page.state, 'setShowClubTxModal'));
+  assert(!Object.hasOwn(page.state, 'setTxNote'));
   assert.equal(page.state.setIsSubmitting, false);
+});
+
+test('cash registration submits the note with the record and clears it only after success', async () => {
+  let submitted;
+  const page = loadPageFunctions(['runOperation', 'handleCreateClubTransaction'], {
+    ...base(), parseAmount, parseDate: loadAccounting().parseDate, txDate:'2026-10-14', txTitle:'燃料', txAmount:'3000', txType:'支出',
+    txCategory:'燃料・交通費', txSource:'部室現金', txEventTag:'秋合宿', txNote:'  補足\n領収書確認済み  ',
+    creationId:()=> 'stable-id', creationIdsRef:{current:{club:'stable-id'}},
+    saveClubOperation:async (operation,payload)=>{submitted={operation,payload};},
+  });
+  await page.functions.handleCreateClubTransaction({preventDefault(){}});
+  assert.equal(submitted.operation,'create_club_transaction');
+  assert.equal(submitted.payload.review_note,'補足\n領収書確認済み');
+  assert.equal(submitted.payload.transaction_date,'2026-10-14');
+  assert.equal(page.state.setTxNote,'');
+  assert.equal(page.state.setShowClubTxModal,false);
 });
 
 test('failed receipt upload never submits or clears the expense', async () => {
